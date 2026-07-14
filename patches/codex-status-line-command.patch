@@ -1,0 +1,1123 @@
+diff --git a/codex-rs/config/src/types.rs b/codex-rs/config/src/types.rs
+index a66ff3f..d9cce4f 100644
+--- a/codex-rs/config/src/types.rs
++++ b/codex-rs/config/src/types.rs
+@@ -681,6 +681,38 @@ pub struct ModelAvailabilityNuxConfig {
+ /// Fallback resize-reflow row cap when Codex cannot identify a terminal-specific scrollback size.
+ pub const DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS: usize = 1_000;
+ 
++fn default_status_line_command_refresh_interval_ms() -> u64 {
++    1_000
++}
++
++fn default_status_line_command_timeout_ms() -> u64 {
++    300
++}
++
++fn default_status_line_command_max_lines() -> u16 {
++    3
++}
++
++/// Opt-in command that renders structured status-line rows from a bounded JSON snapshot.
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
++#[schemars(deny_unknown_fields)]
++pub struct TuiStatusLineCommand {
++    /// Program and arguments executed directly, without a shell.
++    pub argv: Vec<String>,
++
++    /// Minimum time between refresh requests.
++    #[serde(default = "default_status_line_command_refresh_interval_ms")]
++    pub refresh_interval_ms: u64,
++
++    /// Maximum renderer wall-clock time.
++    #[serde(default = "default_status_line_command_timeout_ms")]
++    pub timeout_ms: u64,
++
++    /// Maximum number of rows accepted from the renderer.
++    #[serde(default = "default_status_line_command_max_lines")]
++    pub max_lines: u16,
++}
++
+ /// Collection of settings that are specific to the TUI.
+ #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
+ #[schemars(deny_unknown_fields)]
+@@ -728,6 +760,10 @@ pub struct Tui {
+     #[serde(default = "default_true")]
+     pub status_line_use_colors: bool,
+ 
++    /// Optional external structured status-line renderer.
++    #[serde(default)]
++    pub status_line_command: Option<TuiStatusLineCommand>,
++
+     /// Ordered list of terminal title item identifiers.
+     ///
+     /// When set, the TUI renders the selected items into the terminal window/tab title.
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index eed2328..22f444f 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -3267,6 +3267,18 @@
+           },
+           "type": "array"
+         },
++        "status_line_command": {
++          "anyOf": [
++            {
++              "$ref": "#/definitions/TuiStatusLineCommand"
++            },
++            {
++              "type": "null"
++            }
++          ],
++          "default": null,
++          "description": "Optional external structured status-line renderer."
++        },
+         "status_line_use_colors": {
+           "default": true,
+           "description": "Color status line items with colors derived from the active syntax theme. Defaults to `true`.",
+@@ -3300,6 +3312,44 @@
+       },
+       "type": "object"
+     },
++    "TuiStatusLineCommand": {
++      "additionalProperties": false,
++      "description": "Opt-in command that renders structured status-line rows from a bounded JSON snapshot.",
++      "properties": {
++        "argv": {
++          "description": "Program and arguments executed directly, without a shell.",
++          "items": {
++            "type": "string"
++          },
++          "type": "array"
++        },
++        "max_lines": {
++          "default": 3,
++          "description": "Maximum number of rows accepted from the renderer.",
++          "format": "uint16",
++          "minimum": 0.0,
++          "type": "integer"
++        },
++        "refresh_interval_ms": {
++          "default": 1000,
++          "description": "Minimum time between refresh requests.",
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
++        },
++        "timeout_ms": {
++          "default": 300,
++          "description": "Maximum renderer wall-clock time.",
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
++        }
++      },
++      "required": [
++        "argv"
++      ],
++      "type": "object"
++    },
+     "TuiApprovalKeymap": {
+       "additionalProperties": false,
+       "description": "Approval overlay keybindings.",
+@@ -5541,4 +5591,4 @@
+   },
+   "title": "ConfigToml",
+   "type": "object"
+-}
+\ No newline at end of file
++}
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index 646407c..8e6696f 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -50,6 +50,7 @@ use codex_config::types::ToolSuggestDiscoverable;
+ use codex_config::types::TuiKeymap;
+ use codex_config::types::TuiNotificationSettings;
+ use codex_config::types::TuiPetAnchor;
++use codex_config::types::TuiStatusLineCommand;
+ use codex_config::types::UriBasedFileOpener;
+ use codex_config::types::WindowsSandboxModeToml;
+ use codex_core_plugins::PluginLoadOutcome;
+@@ -822,6 +823,9 @@ pub struct Config {
+     /// Whether to color status line items with colors from the active syntax theme.
+     pub tui_status_line_use_colors: bool,
+ 
++    /// Opt-in command used to render a structured, potentially multi-line status surface.
++    pub tui_status_line_command: Option<TuiStatusLineCommand>,
++
+     /// Ordered list of terminal title item identifiers for the TUI.
+     ///
+     /// When unset, the TUI defaults to: `activity` and `project`.
+@@ -4113,6 +4117,10 @@ impl Config {
+                 .as_ref()
+                 .map(|t| t.status_line_use_colors)
+                 .unwrap_or(true),
++            tui_status_line_command: cfg
++                .tui
++                .as_ref()
++                .and_then(|t| t.status_line_command.clone()),
+             tui_terminal_title: cfg.tui.as_ref().and_then(|t| t.terminal_title.clone()),
+             tui_theme: cfg.tui.as_ref().and_then(|t| t.theme.clone()),
+             tui_pet: cfg.tui.as_ref().and_then(|t| t.pet.clone()),
+diff --git a/codex-rs/tui/Cargo.toml b/codex-rs/tui/Cargo.toml
+index 6c0b83a..f8f4385 100644
+--- a/codex-rs/tui/Cargo.toml
++++ b/codex-rs/tui/Cargo.toml
+@@ -101,6 +101,7 @@ textwrap = { workspace = true }
+ thiserror = { workspace = true }
+ tokio = { workspace = true, features = [
+     "io-std",
++    "io-util",
+     "macros",
+     "process",
+     "rt-multi-thread",
+diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
+index 4a2f030..dd92de6 100644
+--- a/codex-rs/tui/src/app/event_dispatch.rs
++++ b/codex-rs/tui/src/app/event_dispatch.rs
+@@ -2158,6 +2158,17 @@ impl App {
+                 self.chat_widget.set_status_line_branch(cwd, branch);
+                 self.refresh_status_line();
+             }
++            AppEvent::StatusLineCommandUpdated { request_id, result } => {
++                if self
++                    .chat_widget
++                    .finish_status_line_command_render(request_id, result)
++                {
++                    tui.frame_requester().schedule_frame();
++                }
++            }
++            AppEvent::RefreshStatusLineCommand => {
++                self.refresh_status_line();
++            }
+             AppEvent::StatusLineGitSummaryUpdated { cwd, summary } => {
+                 self.chat_widget.set_status_line_git_summary(cwd, summary);
+                 self.refresh_status_line();
+diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
+index 6661ae5..4fc7b9b 100644
+--- a/codex-rs/tui/src/app_event.rs
++++ b/codex-rs/tui/src/app_event.rs
+@@ -34,6 +34,7 @@ use codex_protocol::ThreadId;
+ use codex_protocol::openai_models::ModelPreset;
+ use codex_utils_absolute_path::AbsolutePathBuf;
+ use codex_utils_approval_presets::ApprovalPreset;
++use ratatui::text::Line;
+ 
+ use crate::app_command::AppCommand;
+ use crate::app_server_session::AppServerStartedThread;
+@@ -1003,6 +1004,13 @@ pub(crate) enum AppEvent {
+         cwd: PathBuf,
+         branch: Option<String>,
+     },
++    /// Apply a completed command-backed status render if it still matches the active request.
++    StatusLineCommandUpdated {
++        request_id: u64,
++        result: Result<Vec<Line<'static>>, String>,
++    },
++    /// Start the next command-backed status render after its configured refresh interval.
++    RefreshStatusLineCommand,
+     /// Async update of Git summary fields for status line rendering.
+     StatusLineGitSummaryUpdated {
+         cwd: PathBuf,
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer.rs b/codex-rs/tui/src/bottom_pane/chat_composer.rs
+index 4b3f6f1..afa9bf0 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer.rs
+@@ -200,6 +200,7 @@ use super::footer::render_context_right;
+ use super::footer::render_footer_from_props;
+ use super::footer::render_footer_hint_items;
+ use super::footer::render_footer_line;
++use super::footer::render_status_line_extra_lines;
+ use super::footer::reset_mode_after_activity;
+ use super::footer::side_conversation_context_line;
+ use super::footer::single_line_footer_layout;
+@@ -529,6 +530,7 @@ impl ChatComposer {
+                 goal_status_indicator: None,
+                 ide_context_active: false,
+                 status_line_value: None,
++                status_line_extra_lines: Vec::new(),
+                 status_line_hyperlink_url: None,
+                 status_line_enabled: false,
+                 side_conversation_context_label: None,
+@@ -3385,6 +3387,7 @@ impl ChatComposer {
+             collaboration_modes_enabled: self.collaboration_modes_enabled,
+             is_wsl,
+             status_line_value: self.footer.status_line_value.clone(),
++            status_line_extra_lines: self.footer.status_line_extra_lines.clone(),
+             status_line_enabled: self.footer.status_line_enabled,
+             key_hints: FooterKeyHints {
+                 toggle_shortcuts: self.footer.toggle_shortcuts_key,
+@@ -3899,10 +3902,29 @@ impl ChatComposer {
+     }
+ 
+     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) -> bool {
+-        if self.footer.status_line_value == status_line {
++        if self.footer.status_line_value == status_line
++            && self.footer.status_line_extra_lines.is_empty()
++        {
++            return false;
++        }
++        self.footer.status_line_value = status_line;
++        self.footer.status_line_extra_lines.clear();
++        true
++    }
++
++    /// Replaces the status surface with one or more rows.
++    ///
++    /// The final row remains the primary row because it shares space with Codex's right-side
++    /// indicators. Earlier rows span the full footer width.
++    pub(crate) fn set_status_lines(&mut self, mut lines: Vec<Line<'static>>) -> bool {
++        let status_line = lines.pop();
++        if self.footer.status_line_value == status_line
++            && self.footer.status_line_extra_lines == lines
++        {
+             return false;
+         }
+         self.footer.status_line_value = status_line;
++        self.footer.status_line_extra_lines = lines;
+         true
+     }
+ 
+@@ -4212,6 +4234,32 @@ impl ChatComposer {
+                         self.footer.collaboration_mode_indicator
+                     };
+                     let active_footer_hint_override = self.footer.hint_override.as_ref();
++                    let hint_rect = if status_line_active
++                        && !self.footer.flash_visible()
++                        && active_footer_hint_override.is_none()
++                        && !footer_props.status_line_extra_lines.is_empty()
++                    {
++                        let extra_height =
++                            u16::try_from(footer_props.status_line_extra_lines.len())
++                                .unwrap_or(u16::MAX)
++                                .min(hint_rect.height.saturating_sub(1));
++                        let extra_rect = Rect {
++                            height: extra_height,
++                            ..hint_rect
++                        };
++                        render_status_line_extra_lines(
++                            extra_rect,
++                            buf,
++                            &footer_props.status_line_extra_lines,
++                        );
++                        Rect {
++                            y: hint_rect.y.saturating_add(extra_height),
++                            height: hint_rect.height.saturating_sub(extra_height),
++                            ..hint_rect
++                        }
++                    } else {
++                        hint_rect
++                    };
+                     let mut left_width = if self.footer.flash_visible() {
+                         self.footer
+                             .flash
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer/footer_state.rs b/codex-rs/tui/src/bottom_pane/chat_composer/footer_state.rs
+index 113385f..26496a9 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer/footer_state.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer/footer_state.rs
+@@ -26,6 +26,7 @@ pub(super) struct FooterState {
+     pub(super) goal_status_indicator: Option<GoalStatusIndicator>,
+     pub(super) ide_context_active: bool,
+     pub(super) status_line_value: Option<Line<'static>>,
++    pub(super) status_line_extra_lines: Vec<Line<'static>>,
+     pub(super) status_line_hyperlink_url: Option<String>,
+     pub(super) status_line_enabled: bool,
+     pub(super) side_conversation_context_label: Option<String>,
+@@ -64,10 +65,17 @@ impl FooterState {
+     #[cfg(test)]
+     pub(super) fn status_line_text(&self) -> Option<String> {
+         self.status_line_value.as_ref().map(|line| {
+-            line.spans
++            let mut lines = self
++                .status_line_extra_lines
+                 .iter()
+-                .map(|span| span.content.as_ref())
+-                .collect::<String>()
++                .chain(std::iter::once(line))
++                .map(|line| {
++                    line.spans
++                        .iter()
++                        .map(|span| span.content.as_ref())
++                        .collect::<String>()
++                });
++            lines.by_ref().collect::<Vec<_>>().join("\n")
+         })
+     }
+ }
+diff --git a/codex-rs/tui/src/bottom_pane/footer.rs b/codex-rs/tui/src/bottom_pane/footer.rs
+index e11534a..6f9bb31 100644
+--- a/codex-rs/tui/src/bottom_pane/footer.rs
++++ b/codex-rs/tui/src/bottom_pane/footer.rs
+@@ -43,6 +43,7 @@
+ //! `FooterProps` mapping.
+ use crate::key_hint;
+ use crate::key_hint::KeyBinding;
++use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
+ use crate::render::line_utils::prefix_lines;
+ use crate::status::format_tokens_compact;
+ use crate::ui_consts::FOOTER_INDENT_COLS;
+@@ -76,6 +77,11 @@ pub(crate) struct FooterProps {
+     /// This is rendered when `mode` is `FooterMode::QuitShortcutReminder`.
+     pub(crate) quit_shortcut_key: KeyBinding,
+     pub(crate) status_line_value: Option<Line<'static>>,
++    /// Additional status rows rendered above `status_line_value`.
++    ///
++    /// Keeping the final row in `status_line_value` preserves the existing right-side mode and
++    /// context indicator layout while allowing command-backed status renderers to add rows.
++    pub(crate) status_line_extra_lines: Vec<Line<'static>>,
+     pub(crate) status_line_enabled: bool,
+     pub(crate) key_hints: FooterKeyHints,
+     /// Active thread label shown when the footer is rendering contextual information instead of an
+@@ -264,6 +270,26 @@ pub(crate) fn render_footer_line(area: Rect, buf: &mut Buffer, line: Line<'stati
+     .render(area, buf);
+ }
+ 
++/// Render the full-width rows that precede the primary status row.
++pub(crate) fn render_status_line_extra_lines(
++    area: Rect,
++    buf: &mut Buffer,
++    lines: &[Line<'static>],
++) {
++    let available_width = area.width.saturating_sub(FOOTER_INDENT_COLS as u16) as usize;
++    let lines = lines
++        .iter()
++        .cloned()
++        .map(|line| truncate_line_with_ellipsis_if_overflow(line, available_width))
++        .collect::<Vec<_>>();
++    Paragraph::new(prefix_lines(
++        lines,
++        " ".repeat(FOOTER_INDENT_COLS).into(),
++        " ".repeat(FOOTER_INDENT_COLS).into(),
++    ))
++    .render(area, buf);
++}
++
+ /// Render footer content directly from `FooterProps`.
+ ///
+ /// This is intentionally not part of the width-based collapse/fallback logic.
+@@ -717,7 +743,9 @@ fn footer_from_props_lines(
+     // Passive footer context can come from the configurable status line, the
+     // active agent label, or both combined.
+     if let Some(status_line) = passive_footer_status_line(props) {
+-        return vec![status_line];
++        let mut lines = props.status_line_extra_lines.clone();
++        lines.push(status_line);
++        return lines;
+     }
+     match props.mode {
+         FooterMode::QuitShortcutReminder => {
+@@ -1341,6 +1369,26 @@ mod tests {
+                 } else {
+                     None
+                 };
++                let area = if status_line_active && !props.status_line_extra_lines.is_empty() {
++                    let extra_height = u16::try_from(props.status_line_extra_lines.len())
++                        .unwrap_or(u16::MAX)
++                        .min(area.height.saturating_sub(1));
++                    render_status_line_extra_lines(
++                        Rect {
++                            height: extra_height,
++                            ..area
++                        },
++                        f.buffer_mut(),
++                        &props.status_line_extra_lines,
++                    );
++                    Rect {
++                        y: area.y.saturating_add(extra_height),
++                        height: area.height.saturating_sub(extra_height),
++                        ..area
++                    }
++                } else {
++                    area
++                };
+                 let left_mode_indicator = if status_line_active {
+                     None
+                 } else {
+@@ -1565,6 +1613,7 @@ mod tests {
+                 collaboration_modes_enabled: false,
+                 is_wsl: false,
+                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++                status_line_extra_lines: Vec::new(),
+                 status_line_value: None,
+                 status_line_enabled: false,
+                 key_hints: FooterKeyHints::default_bindings(),
+@@ -1583,6 +1632,7 @@ mod tests {
+                 collaboration_modes_enabled: false,
+                 is_wsl: false,
+                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++                status_line_extra_lines: Vec::new(),
+                 status_line_value: None,
+                 status_line_enabled: false,
+                 key_hints: FooterKeyHints {
+@@ -1604,6 +1654,7 @@ mod tests {
+                 collaboration_modes_enabled: true,
+                 is_wsl: false,
+                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++                status_line_extra_lines: Vec::new(),
+                 status_line_value: None,
+                 status_line_enabled: false,
+                 key_hints: FooterKeyHints::default_bindings(),
+@@ -1622,6 +1673,7 @@ mod tests {
+                 collaboration_modes_enabled: false,
+                 is_wsl: false,
+                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++                status_line_extra_lines: Vec::new(),
+                 status_line_value: None,
+                 status_line_enabled: false,
+                 key_hints: FooterKeyHints::default_bindings(),
+@@ -1640,6 +1692,7 @@ mod tests {
+                 collaboration_modes_enabled: false,
+                 is_wsl: false,
+                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++                status_line_extra_lines: Vec::new(),
+                 status_line_value: None,
+                 status_line_enabled: false,
+                 key_hints: FooterKeyHints::default_bindings(),
+@@ -1658,6 +1711,7 @@ mod tests {
+                 collaboration_modes_enabled: false,
+                 is_wsl: false,
+                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++                status_line_extra_lines: Vec::new(),
+                 status_line_value: None,
+                 status_line_enabled: false,
+                 key_hints: FooterKeyHints::default_bindings(),
+@@ -1676,6 +1730,7 @@ mod tests {
+                 collaboration_modes_enabled: false,
+                 is_wsl: false,
+                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++                status_line_extra_lines: Vec::new(),
+                 status_line_value: None,
+                 status_line_enabled: false,
+                 key_hints: FooterKeyHints::default_bindings(),
+@@ -1694,6 +1749,7 @@ mod tests {
+                 collaboration_modes_enabled: false,
+                 is_wsl: false,
+                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++                status_line_extra_lines: Vec::new(),
+                 status_line_value: None,
+                 status_line_enabled: false,
+                 key_hints: FooterKeyHints::default_bindings(),
+@@ -1712,6 +1768,7 @@ mod tests {
+                 collaboration_modes_enabled: false,
+                 is_wsl: false,
+                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++                status_line_extra_lines: Vec::new(),
+                 status_line_value: None,
+                 status_line_enabled: false,
+                 key_hints: FooterKeyHints::default_bindings(),
+@@ -1732,6 +1789,7 @@ mod tests {
+                 collaboration_modes_enabled: false,
+                 is_wsl: false,
+                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++                status_line_extra_lines: Vec::new(),
+                 status_line_value: None,
+                 status_line_enabled: false,
+                 key_hints: FooterKeyHints::default_bindings(),
+@@ -1752,6 +1810,7 @@ mod tests {
+                 collaboration_modes_enabled: false,
+                 is_wsl: false,
+                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++                status_line_extra_lines: Vec::new(),
+                 status_line_value: None,
+                 status_line_enabled: false,
+                 key_hints: FooterKeyHints::default_bindings(),
+@@ -1768,6 +1827,7 @@ mod tests {
+             collaboration_modes_enabled: true,
+             is_wsl: false,
+             quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++            status_line_extra_lines: Vec::new(),
+             status_line_value: None,
+             status_line_enabled: false,
+             key_hints: FooterKeyHints::default_bindings(),
+@@ -1797,6 +1857,7 @@ mod tests {
+             collaboration_modes_enabled: true,
+             is_wsl: false,
+             quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++            status_line_extra_lines: Vec::new(),
+             status_line_value: None,
+             status_line_enabled: false,
+             key_hints: FooterKeyHints::default_bindings(),
+@@ -1819,6 +1880,7 @@ mod tests {
+             collaboration_modes_enabled: false,
+             is_wsl: false,
+             quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++            status_line_extra_lines: Vec::new(),
+             status_line_value: Some(Line::from("Status line content".to_string())),
+             status_line_enabled: true,
+             key_hints: FooterKeyHints::default_bindings(),
+@@ -1827,6 +1889,24 @@ mod tests {
+ 
+         snapshot_footer("footer_status_line_overrides_shortcuts", props);
+ 
++        let props = FooterProps {
++            mode: FooterMode::ComposerEmpty,
++            esc_backtrack_hint: false,
++            use_shift_enter_hint: false,
++            is_task_running: false,
++            queue_submissions: false,
++            collaboration_modes_enabled: false,
++            is_wsl: false,
++            quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++            status_line_extra_lines: vec![Line::from("Model: GPT-5.4  Context: 79%")],
++            status_line_value: Some(Line::from("Project: cxstatusline  Git: main")),
++            status_line_enabled: true,
++            key_hints: FooterKeyHints::default_bindings(),
++            active_agent_label: None,
++        };
++
++        snapshot_footer("footer_status_line_multiple_rows", props);
++
+         let props = FooterProps {
+             mode: FooterMode::ComposerHasDraft,
+             esc_backtrack_hint: false,
+@@ -1836,6 +1916,7 @@ mod tests {
+             collaboration_modes_enabled: false,
+             is_wsl: false,
+             quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++            status_line_extra_lines: Vec::new(),
+             status_line_value: Some(Line::from("Status line content".to_string())),
+             status_line_enabled: true,
+             key_hints: FooterKeyHints::default_bindings(),
+@@ -1853,6 +1934,7 @@ mod tests {
+             collaboration_modes_enabled: false,
+             is_wsl: false,
+             quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++            status_line_extra_lines: Vec::new(),
+             status_line_value: Some(Line::from("Status line content".to_string())),
+             status_line_enabled: true,
+             key_hints: FooterKeyHints::default_bindings(),
+@@ -1870,6 +1952,7 @@ mod tests {
+             collaboration_modes_enabled: true,
+             is_wsl: false,
+             quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++            status_line_extra_lines: Vec::new(),
+             status_line_value: None, // command timed out / empty
+             status_line_enabled: true,
+             key_hints: FooterKeyHints::default_bindings(),
+@@ -1901,6 +1984,7 @@ mod tests {
+             collaboration_modes_enabled: true,
+             is_wsl: false,
+             quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++            status_line_extra_lines: Vec::new(),
+             status_line_value: None,
+             status_line_enabled: false,
+             key_hints: FooterKeyHints::default_bindings(),
+@@ -1924,6 +2008,7 @@ mod tests {
+             collaboration_modes_enabled: false,
+             is_wsl: false,
+             quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++            status_line_extra_lines: Vec::new(),
+             status_line_value: None,
+             status_line_enabled: true,
+             key_hints: FooterKeyHints::default_bindings(),
+@@ -1948,6 +2033,7 @@ mod tests {
+             collaboration_modes_enabled: true,
+             is_wsl: false,
+             quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++            status_line_extra_lines: Vec::new(),
+             status_line_value: Some(Line::from(
+                 "Status line content that should truncate before the mode indicator".to_string(),
+             )),
+@@ -1973,6 +2059,7 @@ mod tests {
+             collaboration_modes_enabled: false,
+             is_wsl: false,
+             quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++            status_line_extra_lines: Vec::new(),
+             status_line_value: None,
+             status_line_enabled: false,
+             key_hints: FooterKeyHints::default_bindings(),
+@@ -1990,6 +2077,7 @@ mod tests {
+             collaboration_modes_enabled: false,
+             is_wsl: false,
+             quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++            status_line_extra_lines: Vec::new(),
+             status_line_value: Some(Line::from("Status line content".to_string())),
+             status_line_enabled: true,
+             key_hints: FooterKeyHints::default_bindings(),
+@@ -2010,6 +2098,7 @@ mod tests {
+             collaboration_modes_enabled: true,
+             is_wsl: false,
+             quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
++            status_line_extra_lines: Vec::new(),
+             status_line_value: Some(Line::from(
+                 "Status line content that is definitely too long to fit alongside the mode label"
+                     .to_string(),
+diff --git a/codex-rs/tui/src/bottom_pane/mod.rs b/codex-rs/tui/src/bottom_pane/mod.rs
+index 484016c..e7a3f99 100644
+--- a/codex-rs/tui/src/bottom_pane/mod.rs
++++ b/codex-rs/tui/src/bottom_pane/mod.rs
+@@ -1768,6 +1768,12 @@ impl BottomPane {
+         }
+     }
+ 
++    pub(crate) fn set_status_lines(&mut self, status_lines: Vec<Line<'static>>) {
++        if self.composer.set_status_lines(status_lines) {
++            self.request_redraw();
++        }
++    }
++
+     pub(crate) fn set_status_line_hyperlink(&mut self, url: Option<String>) {
+         if self.composer.set_status_line_hyperlink(url) {
+             self.request_redraw();
+diff --git a/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__footer__tests__footer_status_line_multiple_rows.snap b/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__footer__tests__footer_status_line_multiple_rows.snap
+new file mode 100644
+index 0000000..00800cf
+--- /dev/null
++++ b/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__footer__tests__footer_status_line_multiple_rows.snap
+@@ -0,0 +1,5 @@
++---
++source: tui/src/bottom_pane/footer.rs
++expression: terminal.backend()
++---
++"  Model: GPT-5.4  Context: 79%                                                  \n  Project: cxstatusline  Git: main                                              "
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 71d42b8..912427e 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -741,6 +741,12 @@ pub(crate) struct ChatWidget {
+     status_line_workspace_headline_last_requested_at: Option<Instant>,
+     // Set after the backend reports the workspace-message feature gate is disabled.
+     status_line_workspace_messages_disabled: bool,
++    // True while the opt-in command-backed renderer is running.
++    status_line_command_pending: bool,
++    // Correlates renderer completions so stale output cannot replace a newer status surface.
++    status_line_command_request_id: u64,
++    // Last renderer start time, used to debounce refreshes caused by unrelated UI events.
++    status_line_command_last_requested_at: Option<Instant>,
+     // Current thread-goal status shown in the status line when plan mode is inactive.
+     current_goal_status_indicator: Option<GoalStatusIndicator>,
+     current_goal_status: Option<GoalStatusState>,
+diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
+index 5e52869..a554c60 100644
+--- a/codex-rs/tui/src/chatwidget/constructor.rs
++++ b/codex-rs/tui/src/chatwidget/constructor.rs
+@@ -236,6 +236,9 @@ impl ChatWidget {
+             next_status_line_workspace_headline_request_id: 0,
+             status_line_workspace_headline_last_requested_at: None,
+             status_line_workspace_messages_disabled: false,
++            status_line_command_pending: false,
++            status_line_command_request_id: 0,
++            status_line_command_last_requested_at: None,
+             current_goal_status_indicator: None,
+             current_goal_status: None,
+             external_editor_state: ExternalEditorState::Closed,
+diff --git a/codex-rs/tui/src/chatwidget/status_controls.rs b/codex-rs/tui/src/chatwidget/status_controls.rs
+index 2c58be9..aebe902 100644
+--- a/codex-rs/tui/src/chatwidget/status_controls.rs
++++ b/codex-rs/tui/src/chatwidget/status_controls.rs
+@@ -69,6 +69,31 @@ impl ChatWidget {
+         self.bottom_pane.set_status_line(status_line);
+     }
+ 
++    /// Sets a command-rendered, potentially multi-row footer status surface.
++    pub(crate) fn set_status_lines(&mut self, status_lines: Vec<Line<'static>>) {
++        self.bottom_pane.set_status_lines(status_lines);
++    }
++
++    /// Applies a matching command-renderer completion and retains the last good render on error.
++    pub(crate) fn finish_status_line_command_render(
++        &mut self,
++        request_id: u64,
++        result: Result<Vec<Line<'static>>, String>,
++    ) -> bool {
++        if request_id != self.status_line_command_request_id
++            || self.config.tui_status_line_command.is_none()
++        {
++            return false;
++        }
++        self.status_line_command_pending = false;
++        match result {
++            Ok(lines) if !lines.is_empty() => self.set_status_lines(lines),
++            Ok(_) => tracing::debug!("status-line command returned no rows"),
++            Err(err) => tracing::debug!(error = %err, "status-line command failed"),
++        }
++        true
++    }
++
+     /// Sets the terminal hyperlink target for the currently rendered footer status line.
+     pub(crate) fn set_status_line_hyperlink(&mut self, url: Option<String>) {
+         self.bottom_pane.set_status_line_hyperlink(url);
+diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+index 7120462..9cacfc7 100644
+--- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
++++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+@@ -140,7 +140,8 @@ impl ChatWidget {
+     }
+ 
+     fn sync_status_surface_shared_state(&mut self, selections: &StatusSurfaceSelections) {
+-        if !selections.uses_git_branch() {
++        let command_renderer_enabled = self.config.tui_status_line_command.is_some();
++        if !selections.uses_git_branch() && !command_renderer_enabled {
+             self.status_line_branch = None;
+             self.status_line_branch_pending = false;
+             self.status_line_branch_lookup_complete = false;
+@@ -152,7 +153,7 @@ impl ChatWidget {
+             }
+         }
+ 
+-        if !selections.uses_git_summary() {
++        if !selections.uses_git_summary() && !command_renderer_enabled {
+             self.status_line_git_summary = None;
+             self.status_line_git_summary_pending = false;
+             self.status_line_git_summary_lookup_complete = false;
+@@ -175,6 +176,13 @@ impl ChatWidget {
+     }
+ 
+     fn refresh_status_line_from_selections(&mut self, selections: &StatusSurfaceSelections) {
++        if self.config.tui_status_line_command.is_some() {
++            self.bottom_pane.set_status_line_enabled(/*enabled*/ true);
++            self.set_status_line_hyperlink(/*url*/ None);
++            self.request_status_line_command_render();
++            return;
++        }
++
+         let enabled = !selections.status_line_items.is_empty();
+         self.bottom_pane.set_status_line_enabled(enabled);
+         if !enabled {
+@@ -202,6 +210,107 @@ impl ChatWidget {
+         self.set_status_line_hyperlink(hyperlink_url);
+     }
+ 
++    fn request_status_line_command_render(&mut self) {
++        if self.status_line_command_pending {
++            return;
++        }
++        let Some(config) = self.config.tui_status_line_command.clone() else {
++            return;
++        };
++        let refresh_interval = Duration::from_millis(config.refresh_interval_ms.clamp(100, 60_000));
++        let now = Instant::now();
++        if self
++            .status_line_command_last_requested_at
++            .is_some_and(|last| now.saturating_duration_since(last) < refresh_interval)
++        {
++            return;
++        }
++
++        self.status_line_command_pending = true;
++        self.status_line_command_last_requested_at = Some(now);
++        self.status_line_command_request_id = self.status_line_command_request_id.wrapping_add(1);
++        let request_id = self.status_line_command_request_id;
++        let cwd = self.status_line_cwd().to_path_buf();
++        let snapshot = self.status_line_command_snapshot();
++        let tx = self.app_event_tx.clone();
++        tokio::spawn(async move {
++            let result =
++                crate::status_line_command::render_status_lines(&config, &snapshot, &cwd).await;
++            tx.send(AppEvent::StatusLineCommandUpdated { request_id, result });
++            tokio::time::sleep(refresh_interval).await;
++            tx.send(AppEvent::RefreshStatusLineCommand);
++        });
++    }
++
++    fn status_line_command_snapshot(&mut self) -> serde_json::Value {
++        let cwd = self.status_line_cwd().to_path_buf();
++        let root = self.status_line_project_root_for_cwd(&cwd);
++        let usage = self.status_line_total_usage();
++        let context_used_tokens = self
++            .token_info
++            .as_ref()
++            .map(|info| info.last_token_usage.total_tokens);
++        let (five_hour_remaining, weekly_remaining) = self
++            .rate_limit_snapshots_by_limit_id
++            .get("codex")
++            .map(|snapshot| {
++                let five = five_hour_status_window(snapshot)
++                    .map(|(window, _)| (100.0 - window.used_percent).clamp(0.0, 100.0));
++                let weekly = weekly_status_window(snapshot)
++                    .map(|(window, _)| (100.0 - window.used_percent).clamp(0.0, 100.0));
++                (five, weekly)
++            })
++            .unwrap_or((None, None));
++        let git_dirty = self.status_line_git_summary.as_ref().and_then(|summary| {
++            summary
++                .branch_change_stats
++                .as_ref()
++                .map(|stats| stats.additions != 0 || stats.deletions != 0)
++        });
++
++        serde_json::json!({
++            "schema_version": 1,
++            "session": {
++                "id": self.thread_id.map(|id| id.to_string()),
++                "name": self.thread_name.clone(),
++            },
++            "model": {
++                "id": self.config.model.clone(),
++                "display_name": self.model_display_name(),
++                "reasoning_effort": Self::status_line_reasoning_effort_label(
++                    self.effective_reasoning_effort().as_ref(),
++                ),
++            },
++            "workspace": {
++                "cwd": cwd,
++                "root": root,
++                "git_branch": self.status_line_branch.clone(),
++                "git_dirty": git_dirty,
++            },
++            "runtime": {
++                "state": self.run_state_status_text(),
++            },
++            "context": {
++                "used_tokens": context_used_tokens,
++                "window_tokens": self.status_line_context_window_size(),
++                "remaining_percent": self.status_line_context_remaining_percent(),
++            },
++            "rate_limits": {
++                "five_hour_remaining_percent": five_hour_remaining,
++                "weekly_remaining_percent": weekly_remaining,
++            },
++            "usage": {
++                "input_tokens": usage.input_tokens,
++                "output_tokens": usage.output_tokens,
++                "total_tokens": usage.total_tokens,
++            },
++            "terminal": {
++                "columns": self.last_rendered_width.get().unwrap_or(120),
++                "color": true,
++            },
++        })
++    }
++
+     /// Clears the terminal title Codex most recently wrote, if any.
+     ///
+     /// This does not attempt to restore the shell or terminal's previous title;
+diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
+index a26c36f..b5797b8 100644
+--- a/codex-rs/tui/src/lib.rs
++++ b/codex-rs/tui/src/lib.rs
+@@ -169,6 +169,7 @@ mod startup_error;
+ mod startup_hooks_review;
+ mod status;
+ mod status_indicator_widget;
++mod status_line_command;
+ mod streaming;
+ mod style;
+ mod terminal_hyperlinks;
+diff --git a/codex-rs/tui/src/status_line_command.rs b/codex-rs/tui/src/status_line_command.rs
+new file mode 100644
+index 0000000..2c44608
+--- /dev/null
++++ b/codex-rs/tui/src/status_line_command.rs
+@@ -0,0 +1,220 @@
++//! Safe adapter for command-backed multi-line status renderers.
++
++use std::path::Path;
++use std::process::Stdio;
++use std::time::Duration;
++
++use codex_config::types::TuiStatusLineCommand;
++use ratatui::style::Color;
++use ratatui::style::Modifier;
++use ratatui::style::Style;
++use ratatui::text::Line;
++use ratatui::text::Span;
++use serde::Deserialize;
++use serde_json::Value;
++use tokio::io::AsyncWriteExt;
++use tokio::process::Command;
++
++const OUTPUT_BYTES_CAP: usize = 64 * 1024;
++const HARD_MAX_LINES: usize = 5;
++const MAX_SPANS_PER_LINE: usize = 64;
++const MAX_TEXT_CHARS: usize = 4_096;
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct RendererOutput {
++    schema_version: u8,
++    lines: Vec<RendererLine>,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct RendererLine {
++    spans: Vec<RendererSpan>,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct RendererSpan {
++    text: String,
++    #[serde(default)]
++    style: RendererStyle,
++}
++
++#[derive(Debug, Default, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct RendererStyle {
++    fg: Option<RendererColor>,
++    bg: Option<RendererColor>,
++    #[serde(default)]
++    bold: bool,
++    #[serde(default)]
++    dim: bool,
++}
++
++#[derive(Clone, Copy, Debug, Deserialize)]
++#[serde(rename_all = "lowercase")]
++enum RendererColor {
++    Default,
++    Black,
++    Red,
++    Green,
++    Yellow,
++    Blue,
++    Magenta,
++    Cyan,
++    White,
++}
++
++impl From<RendererColor> for Color {
++    fn from(value: RendererColor) -> Self {
++        match value {
++            RendererColor::Default => Color::Reset,
++            RendererColor::Black => Color::Black,
++            RendererColor::Red => Color::Red,
++            RendererColor::Green => Color::Green,
++            RendererColor::Yellow => Color::Yellow,
++            RendererColor::Blue => Color::Blue,
++            RendererColor::Magenta => Color::Magenta,
++            RendererColor::Cyan => Color::Cyan,
++            RendererColor::White => Color::White,
++        }
++    }
++}
++
++/// Runs the explicitly configured renderer and returns validated Ratatui rows.
++pub(crate) async fn render_status_lines(
++    config: &TuiStatusLineCommand,
++    snapshot: &Value,
++    cwd: &Path,
++) -> Result<Vec<Line<'static>>, String> {
++    let (program, args) = config
++        .argv
++        .split_first()
++        .ok_or_else(|| "status-line command argv is empty".to_string())?;
++    if program.trim().is_empty() {
++        return Err("status-line command program is empty".to_string());
++    }
++
++    let input = serde_json::to_vec(snapshot).map_err(|err| err.to_string())?;
++    let mut command = Command::new(program);
++    command
++        .args(args)
++        .current_dir(cwd)
++        .stdin(Stdio::piped())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::piped())
++        .kill_on_drop(true);
++    let mut child = command.spawn().map_err(|err| err.to_string())?;
++    let mut stdin = child
++        .stdin
++        .take()
++        .ok_or_else(|| "status-line command stdin is unavailable".to_string())?;
++    stdin
++        .write_all(&input)
++        .await
++        .map_err(|err| err.to_string())?;
++    drop(stdin);
++
++    let timeout = Duration::from_millis(config.timeout_ms.clamp(50, 5_000));
++    let output = tokio::time::timeout(timeout, child.wait_with_output())
++        .await
++        .map_err(|_| "status-line command timed out".to_string())?
++        .map_err(|err| err.to_string())?;
++    if !output.status.success() {
++        let stderr = String::from_utf8_lossy(&output.stderr);
++        return Err(format!(
++            "status-line command exited with {}: {}",
++            output.status,
++            stderr.trim()
++        ));
++    }
++    if output.stdout.len() > OUTPUT_BYTES_CAP {
++        return Err("status-line command output exceeded 64 KiB".to_string());
++    }
++
++    parse_status_lines(&output.stdout, usize::from(config.max_lines))
++}
++
++fn parse_status_lines(
++    bytes: &[u8],
++    configured_max_lines: usize,
++) -> Result<Vec<Line<'static>>, String> {
++    let output: RendererOutput = serde_json::from_slice(bytes).map_err(|err| err.to_string())?;
++    if output.schema_version != 1 {
++        return Err(format!(
++            "unsupported status-line schema version: {}",
++            output.schema_version
++        ));
++    }
++
++    let max_lines = configured_max_lines.clamp(1, HARD_MAX_LINES);
++    let mut text_chars = 0usize;
++    output
++        .lines
++        .into_iter()
++        .take(max_lines)
++        .map(|line| {
++            if line.spans.len() > MAX_SPANS_PER_LINE {
++                return Err("status-line row has too many spans".to_string());
++            }
++            let spans = line
++                .spans
++                .into_iter()
++                .map(|span| {
++                    if span.text.chars().any(char::is_control) {
++                        return Err("status-line text contains a control character".to_string());
++                    }
++                    text_chars = text_chars.saturating_add(span.text.chars().count());
++                    if text_chars > MAX_TEXT_CHARS {
++                        return Err("status-line text exceeded the size limit".to_string());
++                    }
++                    let mut style = Style::default();
++                    if let Some(fg) = span.style.fg {
++                        style = style.fg(fg.into());
++                    }
++                    if let Some(bg) = span.style.bg {
++                        style = style.bg(bg.into());
++                    }
++                    if span.style.bold {
++                        style = style.add_modifier(Modifier::BOLD);
++                    }
++                    if span.style.dim {
++                        style = style.add_modifier(Modifier::DIM);
++                    }
++                    Ok(Span::styled(span.text, style))
++                })
++                .collect::<Result<Vec<_>, String>>()?;
++            Ok(Line::from(spans))
++        })
++        .collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn parses_multiple_structured_rows() {
++        let lines = parse_status_lines(
++            br#"{"schema_version":1,"lines":[{"spans":[{"text":"model","style":{"fg":"cyan","bold":true}}]},{"spans":[{"text":"main"}]}]}"#,
++            3,
++        )
++        .expect("valid renderer output");
++
++        assert_eq!(lines.len(), 2);
++        assert_eq!(lines[0].spans[0].content, "model");
++        assert_eq!(lines[1].spans[0].content, "main");
++    }
++
++    #[test]
++    fn rejects_terminal_control_characters() {
++        let err = parse_status_lines(
++            b"{\"schema_version\":1,\"lines\":[{\"spans\":[{\"text\":\"bad\\u001b\"}]}]}",
++            3,
++        )
++        .expect_err("escape must be rejected");
++
++        assert!(err.contains("control character"));
++    }
++}

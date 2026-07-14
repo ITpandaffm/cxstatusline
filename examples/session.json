@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "session": {
+    "id": "019-demo",
+    "name": "Build cxstatusline"
+  },
+  "model": {
+    "id": "gpt-5.4",
+    "display_name": "GPT-5.4",
+    "reasoning_effort": "high"
+  },
+  "workspace": {
+    "cwd": "/Users/demo/Projects/cxstatusline",
+    "root": "/Users/demo/Projects/cxstatusline",
+    "git_branch": "main",
+    "git_dirty": true
+  },
+  "runtime": {
+    "state": "working"
+  },
+  "context": {
+    "used_tokens": 42000,
+    "window_tokens": 200000,
+    "remaining_percent": 79
+  },
+  "rate_limits": {
+    "five_hour_remaining_percent": 88,
+    "weekly_remaining_percent": 64
+  },
+  "usage": {
+    "input_tokens": 40000,
+    "output_tokens": 2000,
+    "total_tokens": 42000
+  },
+  "terminal": {
+    "columns": 100,
+    "color": true
+  }
+}

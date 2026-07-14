@@ -1,0 +1,37 @@
+{
+  "name": "cxstatusline",
+  "version": "0.1.0",
+  "description": "A safe, multi-line statusline renderer for OpenAI Codex CLI.",
+  "type": "module",
+  "bin": {
+    "cxstatusline": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/*.test.js && node dist/cli.js demo --format json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "demo": "npm run build && node dist/cli.js demo"
+  },
+  "keywords": [
+    "codex",
+    "openai",
+    "statusline",
+    "terminal",
+    "powerline"
+  ],
+  "author": "ITpandaffm",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}
