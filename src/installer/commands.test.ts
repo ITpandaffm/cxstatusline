@@ -1,7 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  stat,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { doctor, inspectUninstall, install, uninstall } from "./commands.js";
@@ -119,6 +129,28 @@ test("refuses unowned adapter files before downloading", async () => {
   );
   assert.equal(counter.calls, 0);
   assert.equal(await readFile(adapter, "utf8"), "unrelated");
+});
+
+test("install fails closed for a symlinked Codex config", async () => {
+  const env = await temporaryEnvironment();
+  const configPath = join(env.codexHome, "config.toml");
+  const target = join(env.home, "actual-config.toml");
+  await rename(configPath, target);
+  await symlink(target, configPath);
+  const counter = { calls: 0 };
+
+  await assert.rejects(
+    install({
+      ...env,
+      platform: "darwin",
+      arch: "arm64",
+      nodePath: "/usr/bin/node",
+      fetch: fakeReleaseFetch(counter)
+    }),
+    /refusing to modify symlinked Codex config/
+  );
+  assert.equal(counter.calls, 0);
+  assert.equal(await readFile(target, "utf8"), "model = \"gpt\"\n");
 });
 
 test("refuses a different cdx command resolved from PATH", async () => {
@@ -341,6 +373,31 @@ test("updates and uninstall preserve shell profile permissions", async () => {
   assert.equal((await stat(profilePath)).mode & 0o777, 0o600);
   await uninstall({ ...env, platform: "darwin" });
   assert.equal((await stat(profilePath)).mode & 0o777, 0o600);
+});
+
+test("uninstall fails closed for a shell profile changed into a symlink", async () => {
+  const env = await temporaryEnvironment();
+  const profilePath = join(env.home, ".zshrc");
+  await writeFile(profilePath, "# user config\n", "utf8");
+  const installed = await install({
+    ...env,
+    platform: "darwin",
+    arch: "arm64",
+    nodePath: "/usr/bin/node",
+    fetch: fakeReleaseFetch(),
+    profilePath,
+    shell: "zsh"
+  });
+  const target = join(env.home, "actual-zshrc");
+  await rename(profilePath, target);
+  await symlink(target, profilePath);
+
+  await assert.rejects(
+    uninstall({ ...env, platform: "darwin" }),
+    /refusing to modify symlinked shell profile/
+  );
+  assert.match(await readFile(installed.paths.launcher, "utf8"), /^#!\/bin\/sh/);
+  assert.match(await readFile(target, "utf8"), /BEGIN cxstatusline PATH/);
 });
 
 test("an older valid manifest can be upgraded", async () => {

@@ -6,8 +6,8 @@ import { resolve } from "node:path";
 
 // src/installer/commands.ts
 import {
-  access as access2,
   chmod as chmod2,
+  lstat as lstat2,
   mkdir as mkdir2,
   mkdtemp,
   readFile,
@@ -300,10 +300,22 @@ var PATH_BLOCK_START = "# BEGIN cxstatusline PATH";
 var PATH_BLOCK_END = "# END cxstatusline PATH";
 async function exists(path) {
   try {
-    await access2(path);
+    await lstat2(path);
     return true;
   } catch (error) {
     if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+async function assertNotSymlink(path, label) {
+  try {
+    if ((await lstat2(path)).isSymbolicLink()) {
+      throw new Error(
+        "refusing to modify symlinked " + label + ": " + path + "; edit the link target directly or use a regular file"
+      );
+    }
+  } catch (error) {
+    if (error.code === "ENOENT") return;
     throw error;
   }
 }
@@ -339,6 +351,7 @@ function assertProfileInsideHome(profilePath, home, platform) {
   }
 }
 async function atomicWrite(path, data, mode) {
+  await assertNotSymlink(path, "file");
   await mkdir2(dirname2(path), { recursive: true });
   let effectiveMode = mode;
   if (effectiveMode === void 0 && await exists(path)) {
@@ -366,7 +379,11 @@ async function atomicWrite(path, data, mode) {
 }
 async function snapshot(path) {
   try {
-    const [data, metadata] = await Promise.all([readFile(path), stat(path)]);
+    const metadata = await lstat2(path);
+    if (metadata.isSymbolicLink()) {
+      throw new Error("refusing to snapshot symlinked file: " + path);
+    }
+    const data = await readFile(path);
     return { data, mode: metadata.mode & 511 };
   } catch (error) {
     if (error.code === "ENOENT") return {};
@@ -412,6 +429,8 @@ async function probeVersion(executable) {
 async function install(options) {
   const paths = resolveInstallPaths(options);
   const configPath = codexConfigPath(options.home, options.codexHome);
+  await assertNotSymlink(configPath, "Codex config");
+  await assertNotSymlink(paths.manifest, "ownership manifest");
   const previousManifest = await readManifest(paths.manifest);
   if (previousManifest) {
     validateManifest(previousManifest, paths, configPath, options.home, options.platform);
@@ -446,6 +465,7 @@ async function install(options) {
   );
   const profilePath = options.profilePath ?? previousManifest?.profilePath;
   if (profilePath) assertProfileInsideHome(profilePath, options.home, options.platform);
+  if (profilePath) await assertNotSymlink(profilePath, "shell profile");
   if (previousManifest?.profilePath) {
     if (!await exists(previousManifest.profilePath)) {
       throw new Error("managed shell profile is missing: " + previousManifest.profilePath);
@@ -736,6 +756,7 @@ async function inspectUninstall(options) {
 }
 async function uninstall(options) {
   const paths = resolveInstallPaths(options);
+  await assertNotSymlink(paths.manifest, "ownership manifest");
   const manifest = await readManifest(paths.manifest);
   if (!manifest) throw new Error("cxstatusline ownership manifest not found");
   validateManifest(
@@ -745,6 +766,8 @@ async function uninstall(options) {
     options.home,
     options.platform
   );
+  await assertNotSymlink(manifest.codexConfigPath, "Codex config");
+  if (manifest.profilePath) await assertNotSymlink(manifest.profilePath, "shell profile");
   if (await exists(paths.adapter)) {
     verifySha256(await readFile(paths.adapter), manifest.checksums.adapter);
   }
