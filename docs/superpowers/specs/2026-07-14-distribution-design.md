@@ -2,46 +2,114 @@
 
 ## Objective
 
-Make the project usable by someone who discovers it on GitHub without asking them to patch or
-compile OpenAI Codex manually. Installation must preserve the official `codex` executable and must
-not read, copy, or modify Codex credentials.
+Make cxstatusline install like a Codex plugin while still delivering the patched TUI capability
+needed for a multi-line footer. Installation must preserve the official `codex` executable, must
+not read or copy Codex credentials, and must give users a shorter daily command than `codex-cx`.
+
+## Product boundary
+
+Codex plugins can package skills, scripts, hooks, MCP configuration, apps, and assets, but they do
+not currently provide a TUI status-line extension point. The plugin is therefore the trusted setup
+and update surface; the multi-line footer still runs in a separately installed patched adapter.
+
+The public command model is:
+
+```text
+codex    official OpenAI Codex
+cdx      Codex with the cxstatusline adapter
+```
+
+`codex-cx` remains an implementation and troubleshooting name. It is not the primary command in
+user documentation.
 
 ## User experience
 
-The renderer is distributed as the `cxstatusline` npm package. The patched Codex adapter is
-distributed as a separate executable named `codex-cx` through GitHub Releases.
+### First installation
 
-The normal setup is:
+The project repository is also a Codex marketplace. A user runs:
 
 ```text
-npm install --global cxstatusline
-cxstatusline install
-cxstatusline doctor
-codex-cx
+codex plugin marketplace add ITpandaffm/cxstatusline
+codex plugin add cxstatusline@cxstatusline
+codex
 ```
 
-`cxstatusline install` downloads the adapter for the current operating system and CPU, verifies its
-SHA-256 checksum, installs it under the user's local binary directory, creates the renderer config
-only when missing, and adds a managed integration block to Codex's `config.toml`.
+In a new Codex session, the user asks:
 
-`cxstatusline init --codex` performs only the configuration part for users who installed the
-adapter another way. `cxstatusline doctor` reports Node, renderer config, adapter, Codex integration,
-and PATH status without changing anything.
+```text
+Use cxstatusline:setup to install and configure the multi-line statusline.
+```
+
+The setup skill explains the changes, requests approval for filesystem and network actions, detects
+the operating system and CPU, downloads and verifies the adapter, installs the renderer, writes the
+managed Codex configuration, creates the `cdx` launcher, and runs diagnostics.
+
+The normal daily command is then:
+
+```text
+cdx
+```
+
+All arguments pass through unchanged, including `cdx .`, `cdx resume`, and model or config flags.
+
+### Updates and uninstall
+
+Users refresh the marketplace and reinstall the plugin with Codex's plugin commands, start a new
+thread, and run `cxstatusline:setup` again. Setup is idempotent: it upgrades owned files and replaces
+only managed configuration blocks.
+
+The plugin also provides an uninstall workflow. It removes the adapter, renderer, `cdx` launcher,
+and cxstatusline-managed config and shell blocks. It does not remove official Codex, credentials,
+sessions, or unrelated user configuration.
 
 ## Components
 
-### Renderer package
+### Marketplace and plugin
 
-The existing TypeScript renderer remains independent from the adapter. Its command path is written
-to Codex configuration as an absolute Node executable plus an absolute JavaScript entry point, so
-the integration does not depend on shell expansion or npm's global bin directory at runtime.
+The repository contains `.agents/plugins/marketplace.json` and `plugins/cxstatusline/`. The plugin
+manifest advertises the setup, doctor, update, and uninstall workflows. Deterministic scripts live
+inside the plugin; skills explain the changes and invoke those scripts only after user approval.
 
-`init` becomes non-destructive: it refuses to overwrite an existing renderer config unless
-`--force` is supplied.
+Plugin installation itself performs no hidden lifecycle mutation. In particular, cxstatusline does
+not use a `SessionStart` hook as an installer. That avoids hook trust surprises and prevents a
+missing command from producing repeated exit-code-127 startup errors.
+
+### Stable installation directory
+
+Versioned release files are installed behind a stable, user-owned directory:
+
+```text
+Unix:   ~/.local/share/cxstatusline/
+Windows: %LOCALAPPDATA%\cxstatusline\
+```
+
+This directory contains the patched adapter, renderer, release metadata, and last verified
+checksums. Plugin cache paths are never written into Codex configuration because those paths change
+when a plugin is upgraded.
+
+The TypeScript renderer can still be published to npm for contributors, CI, and advanced manual
+installation, but a normal plugin user does not need a global npm install.
+
+### Short launcher
+
+Setup creates a real executable launcher named `cdx`; it does not rely only on a shell alias. A real
+launcher works across interactive shells and scripts and forwards exit codes, signals, environment,
+and arguments to the adapter.
+
+On Unix the launcher lives in `~/.local/bin/cdx`. On Windows it lives in a user-local bin directory
+as `cdx.exe` or `cdx.cmd`. Before writing, setup resolves the existing `cdx` command. If another
+program owns that name, setup stops and offers to keep `codex-cx` or use another explicit name; it
+never overwrites the collision.
+
+If the launcher directory is not on `PATH`, setup offers to add a marker-delimited block to the
+correct startup configuration for Zsh, Bash, Fish, or PowerShell. It does not assume
+`.bash_profile`, and it does not edit a shell file without approval. The doctor command reports when
+a new shell session is required.
 
 ### Codex configuration manager
 
-The manager edits only a marker-delimited block:
+The manager edits only a marker-delimited block in `$CODEX_HOME/config.toml` or
+`~/.codex/config.toml`:
 
 ```toml
 # BEGIN cxstatusline
@@ -50,18 +118,14 @@ The manager edits only a marker-delimited block:
 # END cxstatusline
 ```
 
-An existing managed block is replaced atomically. If an unmanaged
-`[tui.status_line_command]` section already exists, the command stops with an actionable error
-instead of creating invalid duplicate TOML. All other user configuration remains byte-for-byte
-unchanged.
-
-The config path is `$CODEX_HOME/config.toml` when `CODEX_HOME` is set and
-`~/.codex/config.toml` otherwise.
+The renderer command uses stable absolute paths rather than shell expansion. An existing managed
+block is replaced atomically. If an unmanaged `[tui.status_line_command]` section already exists,
+setup stops with an actionable error instead of creating invalid duplicate TOML. All other user
+configuration remains unchanged.
 
 ### Adapter installer
 
-The installer uses the GitHub Releases API for `ITpandaffm/cxstatusline`. Release asset names are
-deterministic:
+The installer downloads raw GitHub Release assets from `ITpandaffm/cxstatusline`:
 
 ```text
 codex-cx-darwin-arm64
@@ -72,51 +136,65 @@ codex-cx-windows-x64.exe
 ```
 
 Every binary has a same-name `.sha256` sidecar. The installer fails closed when the platform is
-unsupported, a checksum is absent, or verification fails. It writes through a temporary file,
-sets executable permissions on Unix, and never overwrites the official `codex` command.
+unsupported, an asset or checksum is absent, or verification fails. It writes through a temporary
+file, sets executable permissions on Unix, and never replaces the official `codex` command.
+
+### Doctor
+
+The doctor workflow is read-only. It checks plugin version, platform support, release metadata,
+checksums, renderer config, managed Codex config, adapter execution, `cdx` resolution, PATH, and the
+official Codex version. It uses pass, warning, and failure states and exits non-zero only when a
+condition prevents `cdx` from working.
 
 ### Release automation
 
 A tag-triggered GitHub Actions workflow checks out the pinned compatible OpenAI Codex revision,
-applies the repository patch, builds supported targets, creates checksums, and attaches artifacts to
-the GitHub Release. The workflow also builds and packs the npm package. Publishing to npm remains a
-separate opt-in step until the repository owner configures npm trusted publishing or an npm token.
+applies the repository patch, builds supported targets, generates checksums, validates the plugin
+and marketplace, builds the renderer, and attaches all artifacts to a GitHub Release. npm publishing
+remains a separate opt-in step until the repository owner configures trusted publishing or a token.
 
-## Error handling
+## Error handling and rollback
 
 Network and GitHub API failures include the URL and HTTP status but never print authorization
-headers. Configuration errors explain the exact file that was left unchanged. A failed adapter
-download or checksum verification leaves no executable at the destination. `doctor` uses distinct
-pass, warning, and failure states and exits non-zero only for conditions that prevent `codex-cx`
-from rendering the statusline.
+headers. A failed download or checksum verification leaves the previous verified installation
+active. Configuration writes use temporary files and atomic replacement where supported.
+
+Setup records only files and managed blocks it owns. If a later step fails, it removes newly created
+temporary artifacts and preserves the last working adapter. Uninstall uses that ownership record so
+it cannot delete unrelated launchers, PATH entries, or config sections.
 
 ## Security and compatibility
 
+- Plugin installation alone does not execute setup scripts or hooks.
+- Setup makes network and filesystem mutations only after approval.
 - The adapter is installed beside, not over, official Codex.
-- The renderer receives the bounded status snapshot defined by protocol v1, not conversation text.
-- No authentication files or environment secrets are copied into release artifacts.
-- Downloads require SHA-256 verification.
-- The adapter records the exact upstream Codex commit used by the patch.
-- Node 20 or newer is required for the renderer and installer.
+- `cdx` uses the user's existing Codex home at runtime; no credentials are copied.
+- The renderer receives bounded protocol-v1 status data, not conversation text.
+- Release downloads require SHA-256 verification.
+- Release metadata records the exact upstream Codex commit used by the patch.
+- Node 20 or newer is required for the renderer and setup scripts.
 
 ## Testing and acceptance
 
-Unit tests cover non-destructive config creation, managed-block replacement, unmanaged-section
-conflicts, platform-to-asset mapping, and checksum rejection. CLI tests use temporary HOME and
-CODEX_HOME directories and never modify the developer's real configuration.
+Unit tests cover managed configuration, plugin-cache-independent paths, platform asset mapping,
+checksum rejection, launcher argument forwarding, command-name collision, PATH-block ownership,
+idempotent updates, and uninstall ownership. CLI tests use temporary HOME, CODEX_HOME, and shell
+profile files and never modify the developer's real environment.
 
 The release is ready when:
 
-1. `npm test` and `npm run check` pass locally.
-2. `npm pack --dry-run` contains the CLI, README, license, protocol docs, and adapter patch.
-3. A workflow-dispatch build produces correctly named adapter artifacts and checksums.
-4. Installing into a temporary directory followed by `doctor` identifies the adapter and managed
-   configuration.
-5. The README clearly distinguishes official `codex` from patched `codex-cx` and documents manual
-   uninstall steps.
+1. Renderer and installer tests and type checks pass locally.
+2. Plugin and marketplace manifests pass the Codex plugin validator.
+3. Package dry runs contain the plugin, CLI, README, license, protocol docs, and adapter patch.
+4. Workflow-dispatch builds produce correctly named adapter assets and checksums.
+5. A temporary-home installation makes `cdx --version` work and doctor reports a healthy setup.
+6. Collision and failed-checksum tests prove that existing commands and working installations are
+   preserved.
+7. README quickstart starts with plugin installation, uses `cdx` for daily work, and documents
+   update, doctor, manual fallback, and uninstall flows.
 
 ## Out of scope for v0.2
 
-The release does not add an interactive layout editor, self-update daemon, Homebrew formula,
-Windows ARM build, automatic migration of arbitrary TOML sections, or automatic npm publication.
-Those can be added after the first reproducible release is proven.
+The release does not add an interactive layout editor, automatic hook-based installation,
+self-update daemon, Homebrew formula, Windows ARM build, arbitrary TOML migration, automatic npm
+publication, or replacement of the official `codex` command.
