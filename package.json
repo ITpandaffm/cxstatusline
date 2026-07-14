@@ -1,13 +1,20 @@
 {
   "name": "cxstatusline",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A safe, multi-line statusline renderer for OpenAI Codex CLI.",
   "type": "module",
   "bin": {
     "cxstatusline": "dist/cli.js"
   },
   "files": [
-    "dist",
+    "dist/**",
+    "!dist/**/*.test.*",
+    ".agents",
+    "plugins",
+    "release",
+    "docs/codex-adapter.md",
+    "docs/protocol.md",
+    "patches",
     "README.md",
     "LICENSE"
   ],
@@ -19,7 +26,8 @@
     "validate:plugin": "node scripts/validate-plugin.mjs",
     "test": "npm run build && node --test dist/*.test.js dist/installer/*.test.js && npm run check:generated && node dist/cli.js demo --format json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "demo": "npm run build && node dist/cli.js demo"
+    "demo": "npm run build && node dist/cli.js demo",
+    "prepack": "npm test"
   },
   "keywords": [
     "codex",
@@ -30,6 +38,14 @@
   ],
   "author": "ITpandaffm",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ITpandaffm/cxstatusline.git"
+  },
+  "homepage": "https://github.com/ITpandaffm/cxstatusline#readme",
+  "bugs": {
+    "url": "https://github.com/ITpandaffm/cxstatusline/issues"
+  },
   "engines": {
     "node": ">=20"
   },

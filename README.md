@@ -1,114 +1,163 @@
 # cxstatusline
 
-`cxstatusline` is a safe, multi-line statusline renderer for OpenAI Codex CLI.
+`cxstatusline` adds a safe, configurable multi-line statusline to OpenAI Codex CLI.
 
-> Project status: early MVP. The renderer and versioned protocol work today. Official Codex does
-> not yet execute external statusline commands, so the companion Codex TUI patch is still required.
+```text
+Model: GPT-5.4  Reasoning: high  working  Context: 79%
+Project: cxstatusline  Git: main  dirty  5h: 88%  Week: 64%
+```
 
-## Goals
+The project keeps the two commands intentionally separate:
 
-- Two or more independently configurable status lines.
-- Model, reasoning, context, rate limits, workspace, Git, session, and token widgets.
-- Structured style output instead of arbitrary terminal control sequences.
-- Width-aware truncation.
-- Cross-platform behavior on macOS, Linux, and Windows.
-- An interactive configuration UI in a later milestone.
+```text
+codex    official OpenAI Codex
+cdx      Codex with the cxstatusline adapter
+```
 
-## Try the renderer
+Official `codex` is never overwritten or aliased.
+
+## Install from the Codex marketplace
+
+Add this repository as a marketplace and install the plugin:
 
 ```bash
-npm install
-npm run build
-node dist/cli.js demo --format ansi
+codex plugin marketplace add ITpandaffm/cxstatusline
+codex plugin add cxstatusline@cxstatusline
+codex
 ```
 
-Or pipe a status snapshot:
+Start a new Codex thread and ask:
+
+```text
+Use cxstatusline:setup to install and configure the multi-line statusline.
+```
+
+The setup skill first shows a read-only plan. After approval, it:
+
+- detects the operating system and CPU;
+- downloads the matching `codex-cx` adapter and renderer from GitHub Releases;
+- verifies both SHA-256 checksums before writing them;
+- adds only a marker-delimited block to Codex config;
+- creates the short `cdx` launcher without replacing `codex`;
+- offers an owned PATH block when the launcher directory is not already available;
+- runs read-only diagnostics.
+
+Open a new shell when setup asks, then use:
 
 ```bash
-node dist/cli.js render --format ansi < examples/session.json
+cdx
+cdx .
+cdx resume
 ```
 
-The default integration format is structured JSON:
+All Codex arguments are forwarded unchanged. `cdx` uses the existing Codex home and authentication
+at runtime; setup does not copy credentials or sessions.
+
+## Doctor, update, and uninstall
+
+In a new official Codex thread, ask:
+
+```text
+Use cxstatusline:doctor to diagnose my installation.
+```
+
+To update the plugin and installed adapter:
 
 ```bash
-node dist/cli.js render < examples/session.json
+codex plugin marketplace upgrade cxstatusline
+codex plugin add cxstatusline@cxstatusline
+codex
 ```
 
-## Protocol
+Then ask:
 
-Codex sends a versioned status snapshot on stdin. The renderer returns safe styled spans:
-
-```json
-{
-  "schema_version": 1,
-  "lines": [
-    {
-      "spans": [
-        { "text": "Model: GPT-5.4", "style": { "fg": "cyan", "bold": true } }
-      ]
-    }
-  ]
-}
+```text
+Use cxstatusline:setup to update cxstatusline.
 ```
 
-The Codex adapter should cap output at five lines, apply a strict timeout, cache the last successful
-render, and reject unsupported styles or oversized payloads.
+To uninstall safely, ask:
 
-The complete v1 contract is documented in [`docs/protocol.md`](docs/protocol.md).
+```text
+Use cxstatusline:uninstall to remove cxstatusline.
+```
 
-## Configuration
+Uninstall removes only files and config/profile blocks recorded as owned by cxstatusline. It leaves
+official Codex, authentication, sessions, and unrelated configuration intact.
 
-Run `cxstatusline init` to write the default configuration to:
+## Why an adapter is currently required
+
+Released Codex versions expose built-in single-line footer items but do not yet expose a plugin API
+for external multi-line TUI rendering. The Codex plugin is therefore the trusted setup and update
+surface, while `cdx` launches a separately built Codex adapter containing the repository patch.
+
+The adapter:
+
+- invokes the renderer directly without a shell;
+- sends a bounded, versioned status snapshot instead of conversation text;
+- applies strict timeout, byte, line, and style limits;
+- keeps the last successful result if a refresh fails;
+- preserves the official Codex installation as `codex`.
+
+See [`docs/codex-adapter.md`](docs/codex-adapter.md) and
+[`docs/protocol.md`](docs/protocol.md).
+
+## Renderer configuration
+
+The default layout uses two lines. Its JSON config lives at:
 
 ```text
 ~/.config/cxstatusline/config.json
 ```
 
-Set `CXSTATUSLINE_CONFIG` or pass `--config` to use another file.
-
-## Codex integration proposal
-
-```toml
-[tui.status_line_command]
-argv = ["cxstatusline", "render"]
-refresh_interval_ms = 1000
-timeout_ms = 300
-max_lines = 3
-```
-
-## Try it with a patched Codex build
-
-The repository includes [`patches/codex-status-line-command.patch`](patches/codex-status-line-command.patch),
-currently based on OpenAI Codex commit `d7ba5ff9553a6aa0898a8e3bd5cb3bc00d0c9ddf`.
+Set `CXSTATUSLINE_CONFIG` to use another file. Advanced users can generate the default config with
+the npm CLI:
 
 ```bash
-# Build and expose the renderer.
-npm install
-npm run build
-npm link
-
-# In a clean openai/codex checkout at the compatible commit:
-git apply /path/to/cxstatusline/patches/codex-status-line-command.patch
-cd codex-rs
-cargo build --release -p codex-cli
+npm install --global cxstatusline
+cxstatusline init
 ```
 
-Add the TOML block above to `~/.codex/config.toml`, then run the patched `codex` binary. The patch
-is an experimental adapter for development and upstream discussion; it does not modify a released
-Codex installation automatically.
+## Contributor quickstart
 
-The upstream-facing Codex change will be kept separate and licensed under Apache-2.0, matching the
-OpenAI Codex repository. This renderer is MIT licensed.
+```bash
+npm install
+npm test
+npm run validate:plugin
+node dist/cli.js demo --format ansi
+```
 
-Adapter design and current compatibility are tracked in
-[`docs/codex-adapter.md`](docs/codex-adapter.md).
+The committed Plugin and renderer bundles must be reproducible:
+
+```bash
+npm run build:plugin
+npm run check:generated
+```
+
+## Build the patched adapter manually
+
+The patch currently targets OpenAI Codex revision
+`d7ba5ff9553a6aa0898a8e3bd5cb3bc00d0c9ddf`.
+
+```bash
+git clone https://github.com/openai/codex.git
+cd codex
+git checkout d7ba5ff9553a6aa0898a8e3bd5cb3bc00d0c9ddf
+git apply /path/to/cxstatusline/patches/codex-status-line-command.patch
+cd codex-rs
+cargo build --release -p codex-cli --bin codex
+```
+
+The upstream-facing patch is Apache-2.0 compatible with OpenAI Codex. The cxstatusline renderer,
+installer, and plugin are MIT licensed.
 
 ## Security model
 
-- External rendering is disabled unless explicitly configured.
-- The renderer receives a bounded status snapshot, never conversation text.
-- Structured spans prevent arbitrary ANSI/OSC injection.
-- The adapter must enforce timeout, line, byte, and style allowlists.
+- Plugin installation alone does not execute lifecycle scripts or hooks.
+- Setup requires approval before network or filesystem mutations.
+- Downloads fail closed when assets or checksums are missing.
+- `SessionStart` is not used for installation.
+- Existing `cdx` commands and unmanaged status-command config are never overwritten.
+- The renderer accepts structured status data and emits allowlisted styled spans.
 
 ## License
 
