@@ -83,6 +83,21 @@ jobs:
         shell: bash
         working-directory: upstream/codex-rs
         run: cargo build --release -p codex-cli --bin codex
+      - name: Smoke-test native adapter through cdx
+        shell: bash
+        run: |
+          smoke_home="$RUNNER_TEMP/cxstatusline-smoke-home"
+          mkdir -p "$smoke_home/.codex" "$smoke_home/bin"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "${{ matrix.executable }}" "$smoke_home/bin/cdx.exe"
+            HOME="$smoke_home" USERPROFILE="$smoke_home" CODEX_HOME="$smoke_home/.codex" \
+              "$smoke_home/bin/cdx.exe" --version
+          else
+            adapter_path="$GITHUB_WORKSPACE/${{ matrix.executable }}"
+            printf '#!/bin/sh\nexec %s "$@"\n' "'${adapter_path}'" > "$smoke_home/bin/cdx"
+            chmod +x "$smoke_home/bin/cdx"
+            HOME="$smoke_home" CODEX_HOME="$smoke_home/.codex" "$smoke_home/bin/cdx" --version
+          fi
       - name: Prepare verified adapter asset
         shell: bash
         run: |

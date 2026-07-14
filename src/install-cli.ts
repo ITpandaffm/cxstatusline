@@ -132,7 +132,9 @@ async function main(): Promise<void> {
     const checks = await doctor({
       ...base,
       arch: process.arch,
-      ...(process.env.PATH ? { pathValue: process.env.PATH } : {})
+      ...(process.env.PATH ? { pathValue: process.env.PATH } : {}),
+      ...(process.env.PATHEXT ? { pathExtValue: process.env.PATHEXT } : {}),
+      cwd: process.cwd()
     });
     print(checks, args.json);
     if (checks.some((check) => check.status === "fail")) process.exitCode = 1;
@@ -152,6 +154,8 @@ async function main(): Promise<void> {
       nodePath: process.execPath,
       fetch: globalThis.fetch,
       ...(process.env.PATH ? { pathValue: process.env.PATH } : {}),
+      ...(process.env.PATHEXT ? { pathExtValue: process.env.PATHEXT } : {}),
+      cwd: process.cwd(),
       ...(args.profilePath ? { profilePath: resolve(args.profilePath) } : {}),
       ...(args.shell ? { shell: args.shell } : {})
     });

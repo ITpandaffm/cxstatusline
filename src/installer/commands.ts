@@ -2,14 +2,17 @@ import {
   access,
   chmod,
   mkdir,
+  mkdtemp,
   readFile,
   rename,
   rm,
   rmdir,
+  stat,
   writeFile
 } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { delimiter, dirname, posix, win32 } from "node:path";
+import { tmpdir } from "node:os";
+import { delimiter, dirname, join, posix, win32 } from "node:path";
 import {
   CODEX_BLOCK_START,
   codexConfigPath,
@@ -24,6 +27,7 @@ import {
   findCommandOnPath,
   renderPathBlock,
   renderUnixLauncher,
+  sameCommandPath,
   type ShellKind
 } from "./launcher.js";
 import { adapterAssetName, resolveInstallPaths, type InstallPaths } from "./paths.js";
@@ -44,6 +48,8 @@ export interface InstallOptions {
   nodePath: string;
   fetch: FetchLike;
   pathValue?: string;
+  pathExtValue?: string;
+  cwd?: string;
   profilePath?: string;
   shell?: ShellKind;
 }
@@ -55,6 +61,8 @@ export interface DoctorOptions {
   platform: string;
   arch: string;
   pathValue?: string;
+  pathExtValue?: string;
+  cwd?: string;
 }
 
 export interface UninstallOptions {
@@ -138,8 +146,10 @@ function validateManifest(
     expected.every((path) => actual.includes(path));
   if (
     manifest.schemaVersion !== 1 ||
-    manifest.pluginVersion !== PLUGIN_VERSION ||
-    manifest.upstreamCodexCommit !== UPSTREAM_CODEX_COMMIT ||
+    typeof manifest.pluginVersion !== "string" ||
+    !/^\d+\.\d+\.\d+(?:[-+].*)?$/.test(manifest.pluginVersion) ||
+    typeof manifest.upstreamCodexCommit !== "string" ||
+    !/^[a-f0-9]{40}$/i.test(manifest.upstreamCodexCommit) ||
     typeof manifest.releaseTag !== "string" ||
     manifest.releaseTag.length === 0 ||
     !exactOwnedPaths ||
@@ -168,10 +178,14 @@ async function atomicWrite(
   mode?: number
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
+  let effectiveMode = mode;
+  if (effectiveMode === undefined && await exists(path)) {
+    effectiveMode = (await stat(path)).mode & 0o777;
+  }
   const temporary = path + ".tmp-" + process.pid;
   await rm(temporary, { force: true });
-  await writeFile(temporary, data, mode === undefined ? undefined : { mode });
-  if (mode !== undefined) await chmod(temporary, mode);
+  await writeFile(temporary, data, effectiveMode === undefined ? undefined : { mode: effectiveMode });
+  if (effectiveMode !== undefined) await chmod(temporary, effectiveMode);
   if (process.platform !== "win32") {
     await rename(temporary, path);
     return;
@@ -189,21 +203,66 @@ async function atomicWrite(
   }
 }
 
-async function snapshot(path: string): Promise<Buffer | undefined> {
+interface FileSnapshot {
+  data?: Buffer;
+  mode?: number;
+}
+
+async function snapshot(path: string): Promise<FileSnapshot> {
   try {
-    return await readFile(path);
+    const [data, metadata] = await Promise.all([readFile(path), stat(path)]);
+    return { data, mode: metadata.mode & 0o777 };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw error;
   }
 }
 
-async function restore(path: string, data: Buffer | undefined, mode?: number): Promise<void> {
-  if (data === undefined) {
+async function restore(
+  path: string,
+  snapshotValue: FileSnapshot | undefined,
+  fallbackMode?: number
+): Promise<void> {
+  snapshotValue ??= {};
+  if (snapshotValue.data === undefined) {
     await rm(path, { force: true });
     return;
   }
-  await atomicWrite(path, data, mode);
+  await atomicWrite(path, snapshotValue.data, snapshotValue.mode ?? fallbackMode);
+}
+
+async function probeVersion(executable: string): Promise<{
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: Error;
+}> {
+  const isolatedHome = await mkdtemp(join(tmpdir(), "cxstatusline-doctor-"));
+  const isolatedCodexHome = join(isolatedHome, ".codex");
+  await mkdir(isolatedCodexHome, { recursive: true });
+  try {
+    const result = spawnSync(executable, ["--version"], {
+      cwd: isolatedHome,
+      encoding: "utf8",
+      timeout: 5000,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        HOME: isolatedHome,
+        USERPROFILE: isolatedHome,
+        CODEX_HOME: isolatedCodexHome,
+        LOCALAPPDATA: join(isolatedHome, "AppData", "Local")
+      }
+    });
+    return {
+      status: result.status,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+      ...(result.error ? { error: result.error } : {})
+    };
+  } finally {
+    await rm(isolatedHome, { recursive: true, force: true });
+  }
 }
 
 export async function install(options: InstallOptions): Promise<InstallResult> {
@@ -227,10 +286,11 @@ export async function install(options: InstallOptions): Promise<InstallResult> {
   const resolvedCdx = await findCommandOnPath(
     "cdx",
     options.pathValue ?? process.env.PATH ?? "",
-    options.platform
+    options.platform,
+    options.cwd,
+    options.pathExtValue
   );
-  const pathApi = options.platform === "win32" ? win32 : posix;
-  if (resolvedCdx && pathApi.resolve(resolvedCdx) !== pathApi.resolve(paths.launcher)) {
+  if (resolvedCdx && !sameCommandPath(resolvedCdx, paths.launcher, options.platform)) {
     throw new Error("another cdx command is already on PATH: " + resolvedCdx);
   }
 
@@ -280,7 +340,7 @@ export async function install(options: InstallOptions): Promise<InstallResult> {
   const tracked = [paths.adapter, paths.renderer, paths.launcher, paths.manifest, configPath];
   if (profilePath) tracked.push(profilePath);
   if (oldProfilePath) tracked.push(oldProfilePath);
-  const before = new Map<string, Buffer | undefined>();
+  const before = new Map<string, FileSnapshot>();
   for (const path of tracked) before.set(path, await snapshot(path));
 
   try {
@@ -383,6 +443,8 @@ export async function doctor(options: DoctorOptions): Promise<DoctorCheck[]> {
     });
   }
   if (manifest) {
+    let adapterVerified = false;
+    let launcherVerified = false;
     for (const [id, path, checksum] of [
       ["adapter-checksum", paths.adapter, manifest.checksums.adapter],
       ["renderer-checksum", paths.renderer, manifest.checksums.renderer]
@@ -390,6 +452,7 @@ export async function doctor(options: DoctorOptions): Promise<DoctorCheck[]> {
       try {
         verifySha256(await readFile(path), checksum);
         checks.push({ id, status: "pass", detail: path });
+        if (id === "adapter-checksum") adapterVerified = true;
       } catch (error) {
         checks.push({
           id,
@@ -425,6 +488,7 @@ export async function doctor(options: DoctorOptions): Promise<DoctorCheck[]> {
         throw new Error("launcher content mismatch");
       }
       checks.push({ id: "launcher-integrity", status: "pass", detail: paths.launcher });
+      launcherVerified = true;
     } catch (error) {
       checks.push({
         id: "launcher-integrity",
@@ -432,22 +496,26 @@ export async function doctor(options: DoctorOptions): Promise<DoctorCheck[]> {
         detail: error instanceof Error ? error.message : String(error)
       });
     }
-    const execution = spawnSync(paths.adapter, ["--version"], {
-      encoding: "utf8",
-      timeout: 5000,
-      windowsHide: true
-    });
-    if (execution.status === 0) {
-      checks.push({
-        id: "adapter-execution",
-        status: "pass",
-        detail: (execution.stdout || execution.stderr).trim() || paths.adapter
-      });
+    if (adapterVerified && launcherVerified) {
+      const execution = await probeVersion(paths.adapter);
+      if (execution.status === 0) {
+        checks.push({
+          id: "adapter-execution",
+          status: "pass",
+          detail: (execution.stdout || execution.stderr).trim() || paths.adapter
+        });
+      } else {
+        checks.push({
+          id: "adapter-execution",
+          status: "fail",
+          detail: execution.error?.message || execution.stderr.trim() || "adapter exited unsuccessfully"
+        });
+      }
     } else {
       checks.push({
         id: "adapter-execution",
         status: "fail",
-        detail: execution.error?.message || execution.stderr.trim() || "adapter exited unsuccessfully"
+        detail: "execution skipped because adapter or launcher integrity could not be verified"
       });
     }
   }
@@ -476,20 +544,26 @@ export async function doctor(options: DoctorOptions): Promise<DoctorCheck[]> {
   const resolvedCdx = await findCommandOnPath(
     "cdx",
     options.pathValue ?? process.env.PATH ?? "",
-    options.platform
+    options.platform,
+    options.cwd,
+    options.pathExtValue
   );
-  const pathApi = options.platform === "win32" ? win32 : posix;
+  const cdxIsOwned = resolvedCdx
+    ? sameCommandPath(resolvedCdx, paths.launcher, options.platform)
+    : false;
   checks.push({
     id: "cdx-resolution",
-    status: resolvedCdx && pathApi.resolve(resolvedCdx) === pathApi.resolve(paths.launcher)
+    status: cdxIsOwned
       ? "pass"
-      : "warn",
+      : resolvedCdx ? "fail" : "warn",
     detail: resolvedCdx ?? "cdx is not currently resolved from PATH"
   });
   const resolvedCodex = await findCommandOnPath(
     "codex",
     options.pathValue ?? process.env.PATH ?? "",
-    options.platform
+    options.platform,
+    options.cwd,
+    options.pathExtValue
   );
   if (!resolvedCodex) {
     checks.push({
@@ -498,11 +572,7 @@ export async function doctor(options: DoctorOptions): Promise<DoctorCheck[]> {
       detail: "official codex is not currently resolved from PATH"
     });
   } else {
-    const codexVersion = spawnSync(resolvedCodex, ["--version"], {
-      encoding: "utf8",
-      timeout: 5000,
-      windowsHide: true
-    });
+    const codexVersion = await probeVersion(resolvedCodex);
     checks.push({
       id: "official-codex",
       status: codexVersion.status === 0 ? "pass" : "warn",
@@ -597,7 +667,7 @@ export async function uninstall(options: UninstallOptions): Promise<void> {
     paths.manifest,
     ...(manifest.profilePath ? [manifest.profilePath] : [])
   ];
-  const before = new Map<string, Buffer | undefined>();
+  const before = new Map<string, FileSnapshot>();
   for (const path of tracked) before.set(path, await snapshot(path));
   try {
     await atomicWrite(manifest.codexConfigPath, nextConfig, 0o600);

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { doctor, inspectUninstall, install, uninstall } from "./commands.js";
@@ -12,7 +12,9 @@ function checksum(bytes: Uint8Array): string {
 }
 
 function fakeReleaseFetch(counter?: { calls: number }): FetchLike {
-  const adapter = Buffer.from("#!/bin/sh\nprintf 'codex-cx 0.2.0\\n'\n");
+  const adapter = Buffer.from(
+    "#!/bin/sh\nmkdir -p \"$CODEX_HOME\"\ntouch \"$CODEX_HOME/probe-ran\"\nprintf 'codex-cx 0.2.0\\n'\n"
+  );
   const renderer = Buffer.from("#!/usr/bin/env node\n");
   const assets: Record<string, Uint8Array | string> = {
     "codex-cx-darwin-arm64": adapter,
@@ -197,6 +199,25 @@ test("doctor is read-only and reports a healthy temporary installation", async (
     "pass"
   );
   assert.equal(await readFile(join(env.codexHome, "config.toml"), "utf8"), before);
+  await assert.rejects(access(join(env.codexHome, "probe-ran")));
+});
+
+test("doctor fails when another cdx shadows the owned launcher", async () => {
+  const env = await temporaryEnvironment();
+  await install({
+    ...env,
+    platform: "darwin",
+    arch: "arm64",
+    nodePath: "/usr/bin/node",
+    fetch: fakeReleaseFetch(),
+    pathValue: ""
+  });
+  const otherBin = join(env.home, "shadow-bin");
+  await mkdir(otherBin, { recursive: true });
+  await writeFile(join(otherBin, "cdx"), "#!/bin/sh\n", { mode: 0o755 });
+
+  const checks = await doctor({ ...env, platform: "darwin", arch: "arm64", pathValue: otherBin });
+  assert.equal(checks.find((check) => check.id === "cdx-resolution")?.status, "fail");
 });
 
 test("doctor fails when an installed renderer no longer matches its checksum", async () => {
@@ -219,6 +240,34 @@ test("doctor fails when an installed renderer no longer matches its checksum", a
     checks.find((check) => check.id === "renderer-checksum")?.status,
     "fail"
   );
+});
+
+test("doctor never executes an adapter whose checksum failed", async () => {
+  const env = await temporaryEnvironment();
+  const installed = await install({
+    ...env,
+    platform: "darwin",
+    arch: "arm64",
+    nodePath: "/usr/bin/node",
+    fetch: fakeReleaseFetch(),
+    pathValue: ""
+  });
+  const marker = join(env.home, "tampered-adapter-ran");
+  await writeFile(
+    installed.paths.adapter,
+    "#!/bin/sh\ntouch " + JSON.stringify(marker) + "\n",
+    { mode: 0o755 }
+  );
+
+  const checks = await doctor({
+    ...env,
+    platform: "darwin",
+    arch: "arm64",
+    pathValue: ""
+  });
+  assert.equal(checks.find((check) => check.id === "adapter-checksum")?.status, "fail");
+  assert.equal(checks.find((check) => check.id === "adapter-execution")?.status, "fail");
+  await assert.rejects(access(marker));
 });
 
 test("doctor fails when the managed Codex command is modified", async () => {
@@ -273,6 +322,50 @@ test("an update preserves the owned shell profile when no new profile is supplie
 
   await uninstall({ ...env, platform: "darwin" });
   assert.equal(await readFile(profilePath, "utf8"), "# user config\n");
+});
+
+test("updates and uninstall preserve shell profile permissions", async () => {
+  const env = await temporaryEnvironment();
+  const profilePath = join(env.home, ".zshrc");
+  await writeFile(profilePath, "# private config\n", { mode: 0o600 });
+  await chmod(profilePath, 0o600);
+  await install({
+    ...env,
+    platform: "darwin",
+    arch: "arm64",
+    nodePath: "/usr/bin/node",
+    fetch: fakeReleaseFetch(),
+    profilePath,
+    shell: "zsh"
+  });
+  assert.equal((await stat(profilePath)).mode & 0o777, 0o600);
+  await uninstall({ ...env, platform: "darwin" });
+  assert.equal((await stat(profilePath)).mode & 0o777, 0o600);
+});
+
+test("an older valid manifest can be upgraded", async () => {
+  const env = await temporaryEnvironment();
+  const installed = await install({
+    ...env,
+    platform: "darwin",
+    arch: "arm64",
+    nodePath: "/usr/bin/node",
+    fetch: fakeReleaseFetch()
+  });
+  const manifest = JSON.parse(await readFile(installed.paths.manifest, "utf8"));
+  manifest.pluginVersion = "0.1.0";
+  manifest.upstreamCodexCommit = "1".repeat(40);
+  await writeFile(installed.paths.manifest, JSON.stringify(manifest), "utf8");
+
+  await install({
+    ...env,
+    platform: "darwin",
+    arch: "arm64",
+    nodePath: "/usr/bin/node",
+    fetch: fakeReleaseFetch()
+  });
+  const upgraded = JSON.parse(await readFile(installed.paths.manifest, "utf8"));
+  assert.equal(upgraded.pluginVersion, "0.2.0");
 });
 
 test("an update migrates the owned PATH block to a newly approved profile", async () => {

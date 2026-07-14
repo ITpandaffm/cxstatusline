@@ -30,14 +30,20 @@ async function pathExists(path: string): Promise<boolean> {
 export async function findCommandOnPath(
   command: string,
   pathValue: string,
-  platform: string
+  platform: string,
+  cwd = process.cwd(),
+  pathExtValue = process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD"
 ): Promise<string | undefined> {
   const pathApi = platform === "win32" ? win32 : posix;
   const separator = platform === "win32" ? ";" : delimiter;
-  const extensions = platform === "win32"
-    ? [".exe", ".cmd", ".bat", ".com", ""]
+  const hasWindowsExtension = platform === "win32" && win32.extname(command).length > 0;
+  const extensions = platform === "win32" && !hasWindowsExtension
+    ? pathExtValue.split(";").filter(Boolean).map((extension) =>
+      extension.startsWith(".") ? extension : "." + extension)
     : [""];
-  for (const directory of pathValue.split(separator).filter(Boolean)) {
+  const pathDirectories = pathValue.split(separator).map((directory) => directory || cwd);
+  const directories = platform === "win32" ? [cwd, ...pathDirectories] : pathDirectories;
+  for (const directory of directories) {
     for (const extension of extensions) {
       const candidate = pathApi.join(directory, command + extension);
       try {
@@ -50,6 +56,15 @@ export async function findCommandOnPath(
     }
   }
   return undefined;
+}
+
+export function sameCommandPath(left: string, right: string, platform: string): boolean {
+  const pathApi = platform === "win32" ? win32 : posix;
+  const normalizedLeft = pathApi.resolve(left);
+  const normalizedRight = pathApi.resolve(right);
+  return platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
 }
 
 export async function createLauncher(options: CreateLauncherOptions): Promise<void> {

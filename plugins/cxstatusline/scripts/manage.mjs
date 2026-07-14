@@ -9,14 +9,17 @@ import {
   access as access2,
   chmod as chmod2,
   mkdir as mkdir2,
+  mkdtemp,
   readFile,
   rename as rename2,
   rm as rm2,
   rmdir,
+  stat,
   writeFile as writeFile2
 } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { delimiter as delimiter2, dirname as dirname2, posix as posix3, win32 as win323 } from "node:path";
+import { tmpdir } from "node:os";
+import { delimiter as delimiter2, dirname as dirname2, join as join2, posix as posix3, win32 as win323 } from "node:path";
 
 // src/installer/codex-config.ts
 import { join } from "node:path";
@@ -130,11 +133,14 @@ async function pathExists(path) {
     throw error;
   }
 }
-async function findCommandOnPath(command, pathValue, platform) {
+async function findCommandOnPath(command, pathValue, platform, cwd = process.cwd(), pathExtValue = process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD") {
   const pathApi = platform === "win32" ? win32 : posix;
   const separator = platform === "win32" ? ";" : delimiter;
-  const extensions = platform === "win32" ? [".exe", ".cmd", ".bat", ".com", ""] : [""];
-  for (const directory of pathValue.split(separator).filter(Boolean)) {
+  const hasWindowsExtension = platform === "win32" && win32.extname(command).length > 0;
+  const extensions = platform === "win32" && !hasWindowsExtension ? pathExtValue.split(";").filter(Boolean).map((extension) => extension.startsWith(".") ? extension : "." + extension) : [""];
+  const pathDirectories = pathValue.split(separator).map((directory) => directory || cwd);
+  const directories = platform === "win32" ? [cwd, ...pathDirectories] : pathDirectories;
+  for (const directory of directories) {
     for (const extension of extensions) {
       const candidate = pathApi.join(directory, command + extension);
       try {
@@ -147,6 +153,12 @@ async function findCommandOnPath(command, pathValue, platform) {
     }
   }
   return void 0;
+}
+function sameCommandPath(left, right, platform) {
+  const pathApi = platform === "win32" ? win32 : posix;
+  const normalizedLeft = pathApi.resolve(left);
+  const normalizedRight = pathApi.resolve(right);
+  return platform === "win32" ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase() : normalizedLeft === normalizedRight;
 }
 async function createLauncher(options) {
   const exists2 = await pathExists(options.launcher);
@@ -314,7 +326,7 @@ function validateManifest(manifest, paths, expectedConfigPath, home, platform) {
   const expected = expectedOwnedPaths(paths);
   const actual = manifest.ownedPaths;
   const exactOwnedPaths = Array.isArray(actual) && actual.length === expected.length && expected.every((path) => actual.includes(path));
-  if (manifest.schemaVersion !== 1 || manifest.pluginVersion !== PLUGIN_VERSION || manifest.upstreamCodexCommit !== UPSTREAM_CODEX_COMMIT || typeof manifest.releaseTag !== "string" || manifest.releaseTag.length === 0 || !exactOwnedPaths || manifest.codexConfigPath !== expectedConfigPath || typeof manifest.nodePath !== "string" || manifest.nodePath.length === 0 || !/^[a-f0-9]{64}$/i.test(manifest.checksums?.adapter ?? "") || !/^[a-f0-9]{64}$/i.test(manifest.checksums?.renderer ?? "")) {
+  if (manifest.schemaVersion !== 1 || typeof manifest.pluginVersion !== "string" || !/^\d+\.\d+\.\d+(?:[-+].*)?$/.test(manifest.pluginVersion) || typeof manifest.upstreamCodexCommit !== "string" || !/^[a-f0-9]{40}$/i.test(manifest.upstreamCodexCommit) || typeof manifest.releaseTag !== "string" || manifest.releaseTag.length === 0 || !exactOwnedPaths || manifest.codexConfigPath !== expectedConfigPath || typeof manifest.nodePath !== "string" || manifest.nodePath.length === 0 || !/^[a-f0-9]{64}$/i.test(manifest.checksums?.adapter ?? "") || !/^[a-f0-9]{64}$/i.test(manifest.checksums?.renderer ?? "")) {
     throw new Error("cxstatusline ownership manifest does not match this installation");
   }
   if (manifest.profilePath) assertProfileInsideHome(manifest.profilePath, home, platform);
@@ -328,10 +340,14 @@ function assertProfileInsideHome(profilePath, home, platform) {
 }
 async function atomicWrite(path, data, mode) {
   await mkdir2(dirname2(path), { recursive: true });
+  let effectiveMode = mode;
+  if (effectiveMode === void 0 && await exists(path)) {
+    effectiveMode = (await stat(path)).mode & 511;
+  }
   const temporary = path + ".tmp-" + process.pid;
   await rm2(temporary, { force: true });
-  await writeFile2(temporary, data, mode === void 0 ? void 0 : { mode });
-  if (mode !== void 0) await chmod2(temporary, mode);
+  await writeFile2(temporary, data, effectiveMode === void 0 ? void 0 : { mode: effectiveMode });
+  if (effectiveMode !== void 0) await chmod2(temporary, effectiveMode);
   if (process.platform !== "win32") {
     await rename2(temporary, path);
     return;
@@ -350,18 +366,48 @@ async function atomicWrite(path, data, mode) {
 }
 async function snapshot(path) {
   try {
-    return await readFile(path);
+    const [data, metadata] = await Promise.all([readFile(path), stat(path)]);
+    return { data, mode: metadata.mode & 511 };
   } catch (error) {
-    if (error.code === "ENOENT") return void 0;
+    if (error.code === "ENOENT") return {};
     throw error;
   }
 }
-async function restore(path, data, mode) {
-  if (data === void 0) {
+async function restore(path, snapshotValue, fallbackMode) {
+  snapshotValue ??= {};
+  if (snapshotValue.data === void 0) {
     await rm2(path, { force: true });
     return;
   }
-  await atomicWrite(path, data, mode);
+  await atomicWrite(path, snapshotValue.data, snapshotValue.mode ?? fallbackMode);
+}
+async function probeVersion(executable) {
+  const isolatedHome = await mkdtemp(join2(tmpdir(), "cxstatusline-doctor-"));
+  const isolatedCodexHome = join2(isolatedHome, ".codex");
+  await mkdir2(isolatedCodexHome, { recursive: true });
+  try {
+    const result = spawnSync(executable, ["--version"], {
+      cwd: isolatedHome,
+      encoding: "utf8",
+      timeout: 5e3,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        HOME: isolatedHome,
+        USERPROFILE: isolatedHome,
+        CODEX_HOME: isolatedCodexHome,
+        LOCALAPPDATA: join2(isolatedHome, "AppData", "Local")
+      }
+    });
+    return {
+      status: result.status,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+      ...result.error ? { error: result.error } : {}
+    };
+  } finally {
+    await rm2(isolatedHome, { recursive: true, force: true });
+  }
 }
 async function install(options) {
   const paths = resolveInstallPaths(options);
@@ -383,10 +429,11 @@ async function install(options) {
   const resolvedCdx = await findCommandOnPath(
     "cdx",
     options.pathValue ?? process.env.PATH ?? "",
-    options.platform
+    options.platform,
+    options.cwd,
+    options.pathExtValue
   );
-  const pathApi = options.platform === "win32" ? win323 : posix3;
-  if (resolvedCdx && pathApi.resolve(resolvedCdx) !== pathApi.resolve(paths.launcher)) {
+  if (resolvedCdx && !sameCommandPath(resolvedCdx, paths.launcher, options.platform)) {
     throw new Error("another cdx command is already on PATH: " + resolvedCdx);
   }
   if (await exists(paths.launcher) && !ownedPaths.includes(paths.launcher)) {
@@ -523,6 +570,8 @@ async function doctor(options) {
     });
   }
   if (manifest) {
+    let adapterVerified = false;
+    let launcherVerified = false;
     for (const [id, path, checksum] of [
       ["adapter-checksum", paths.adapter, manifest.checksums.adapter],
       ["renderer-checksum", paths.renderer, manifest.checksums.renderer]
@@ -530,6 +579,7 @@ async function doctor(options) {
       try {
         verifySha256(await readFile(path), checksum);
         checks.push({ id, status: "pass", detail: path });
+        if (id === "adapter-checksum") adapterVerified = true;
       } catch (error) {
         checks.push({
           id,
@@ -565,6 +615,7 @@ async function doctor(options) {
         throw new Error("launcher content mismatch");
       }
       checks.push({ id: "launcher-integrity", status: "pass", detail: paths.launcher });
+      launcherVerified = true;
     } catch (error) {
       checks.push({
         id: "launcher-integrity",
@@ -572,22 +623,26 @@ async function doctor(options) {
         detail: error instanceof Error ? error.message : String(error)
       });
     }
-    const execution = spawnSync(paths.adapter, ["--version"], {
-      encoding: "utf8",
-      timeout: 5e3,
-      windowsHide: true
-    });
-    if (execution.status === 0) {
-      checks.push({
-        id: "adapter-execution",
-        status: "pass",
-        detail: (execution.stdout || execution.stderr).trim() || paths.adapter
-      });
+    if (adapterVerified && launcherVerified) {
+      const execution = await probeVersion(paths.adapter);
+      if (execution.status === 0) {
+        checks.push({
+          id: "adapter-execution",
+          status: "pass",
+          detail: (execution.stdout || execution.stderr).trim() || paths.adapter
+        });
+      } else {
+        checks.push({
+          id: "adapter-execution",
+          status: "fail",
+          detail: execution.error?.message || execution.stderr.trim() || "adapter exited unsuccessfully"
+        });
+      }
     } else {
       checks.push({
         id: "adapter-execution",
         status: "fail",
-        detail: execution.error?.message || execution.stderr.trim() || "adapter exited unsuccessfully"
+        detail: "execution skipped because adapter or launcher integrity could not be verified"
       });
     }
   }
@@ -615,18 +670,22 @@ async function doctor(options) {
   const resolvedCdx = await findCommandOnPath(
     "cdx",
     options.pathValue ?? process.env.PATH ?? "",
-    options.platform
+    options.platform,
+    options.cwd,
+    options.pathExtValue
   );
-  const pathApi = options.platform === "win32" ? win323 : posix3;
+  const cdxIsOwned = resolvedCdx ? sameCommandPath(resolvedCdx, paths.launcher, options.platform) : false;
   checks.push({
     id: "cdx-resolution",
-    status: resolvedCdx && pathApi.resolve(resolvedCdx) === pathApi.resolve(paths.launcher) ? "pass" : "warn",
+    status: cdxIsOwned ? "pass" : resolvedCdx ? "fail" : "warn",
     detail: resolvedCdx ?? "cdx is not currently resolved from PATH"
   });
   const resolvedCodex = await findCommandOnPath(
     "codex",
     options.pathValue ?? process.env.PATH ?? "",
-    options.platform
+    options.platform,
+    options.cwd,
+    options.pathExtValue
   );
   if (!resolvedCodex) {
     checks.push({
@@ -635,11 +694,7 @@ async function doctor(options) {
       detail: "official codex is not currently resolved from PATH"
     });
   } else {
-    const codexVersion = spawnSync(resolvedCodex, ["--version"], {
-      encoding: "utf8",
-      timeout: 5e3,
-      windowsHide: true
-    });
+    const codexVersion = await probeVersion(resolvedCodex);
     checks.push({
       id: "official-codex",
       status: codexVersion.status === 0 ? "pass" : "warn",
@@ -856,7 +911,9 @@ async function main() {
     const checks = await doctor({
       ...base,
       arch: process.arch,
-      ...process.env.PATH ? { pathValue: process.env.PATH } : {}
+      ...process.env.PATH ? { pathValue: process.env.PATH } : {},
+      ...process.env.PATHEXT ? { pathExtValue: process.env.PATHEXT } : {},
+      cwd: process.cwd()
     });
     print(checks, args.json);
     if (checks.some((check) => check.status === "fail")) process.exitCode = 1;
@@ -874,6 +931,8 @@ async function main() {
       nodePath: process.execPath,
       fetch: globalThis.fetch,
       ...process.env.PATH ? { pathValue: process.env.PATH } : {},
+      ...process.env.PATHEXT ? { pathExtValue: process.env.PATHEXT } : {},
+      cwd: process.cwd(),
       ...args.profilePath ? { profilePath: resolve(args.profilePath) } : {},
       ...args.shell ? { shell: args.shell } : {}
     });
