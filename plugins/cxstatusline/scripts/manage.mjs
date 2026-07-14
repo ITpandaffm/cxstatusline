@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 
 // src/installer/commands.ts
 import {
-  access,
+  access as access2,
   chmod as chmod2,
   mkdir as mkdir2,
   readFile,
@@ -15,7 +15,8 @@ import {
   rmdir,
   writeFile as writeFile2
 } from "node:fs/promises";
-import { delimiter, dirname as dirname2 } from "node:path";
+import { spawnSync } from "node:child_process";
+import { delimiter as delimiter2, dirname as dirname2, posix as posix3, win32 as win323 } from "node:path";
 
 // src/installer/codex-config.ts
 import { join } from "node:path";
@@ -78,10 +79,15 @@ function renderCodexBlock(nodePath, rendererPath) {
   ].join("\n");
 }
 function updateCodexConfig(text, body) {
-  if (!text.includes(CODEX_BLOCK_START) && /^\s*\[tui\.status_line_command\]\s*$/m.test(text)) {
+  const unmanagedText = removeManagedBlock(text, CODEX_BLOCK_START, CODEX_BLOCK_END);
+  if (/^\s*\[tui\.status_line_command\]\s*$/m.test(unmanagedText)) {
     throw new Error("unmanaged [tui.status_line_command] already exists");
   }
   return upsertManagedBlock(text, CODEX_BLOCK_START, CODEX_BLOCK_END, body);
+}
+function hasExactCodexBlock(text, body) {
+  const expected = CODEX_BLOCK_START + "\n" + body + "\n" + CODEX_BLOCK_END;
+  return text.includes(expected);
 }
 function removeCodexConfig(text) {
   return removeManagedBlock(text, CODEX_BLOCK_START, CODEX_BLOCK_END);
@@ -106,8 +112,9 @@ function verifySha256(bytes, expected) {
 }
 
 // src/installer/launcher.ts
-import { chmod, copyFile, lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { constants } from "node:fs";
+import { access, chmod, copyFile, lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { delimiter, dirname, posix, win32 } from "node:path";
 function shellSingleQuote(value) {
   return "'" + value.replaceAll("'", "'\\''") + "'";
 }
@@ -123,6 +130,24 @@ async function pathExists(path) {
     throw error;
   }
 }
+async function findCommandOnPath(command, pathValue, platform) {
+  const pathApi = platform === "win32" ? win32 : posix;
+  const separator = platform === "win32" ? ";" : delimiter;
+  const extensions = platform === "win32" ? [".exe", ".cmd", ".bat", ".com", ""] : [""];
+  for (const directory of pathValue.split(separator).filter(Boolean)) {
+    for (const extension of extensions) {
+      const candidate = pathApi.join(directory, command + extension);
+      try {
+        await access(candidate, platform === "win32" ? constants.F_OK : constants.X_OK);
+        return candidate;
+      } catch (error) {
+        if (["ENOENT", "EACCES"].includes(error.code ?? "")) continue;
+        throw error;
+      }
+    }
+  }
+  return void 0;
+}
 async function createLauncher(options) {
   const exists2 = await pathExists(options.launcher);
   if (exists2 && !options.ownedPaths.includes(options.launcher)) {
@@ -137,8 +162,20 @@ async function createLauncher(options) {
     await writeFile(temporary, renderUnixLauncher(options.adapter), { mode: 493 });
     await chmod(temporary, 493);
   }
-  if (exists2) await rm(options.launcher, { force: true });
-  await rename(temporary, options.launcher);
+  if (options.platform !== "win32") {
+    await rename(temporary, options.launcher);
+    return;
+  }
+  const backup = options.launcher + ".bak-" + process.pid;
+  await rm(backup, { force: true });
+  if (exists2) await rename(options.launcher, backup);
+  try {
+    await rename(temporary, options.launcher);
+    await rm(backup, { force: true });
+  } catch (error) {
+    if (exists2 && await pathExists(backup)) await rename(backup, options.launcher);
+    throw error;
+  }
 }
 function renderPathBlock(shell, binDirectory) {
   const start = "# BEGIN cxstatusline PATH";
@@ -154,26 +191,26 @@ function renderPathBlock(shell, binDirectory) {
 }
 
 // src/installer/paths.ts
-import { posix, win32 } from "node:path";
+import { posix as posix2, win32 as win322 } from "node:path";
 function resolveInstallPaths(input) {
   if (input.platform === "win32") {
-    const base = input.localAppData ?? win32.join(input.home, "AppData", "Local");
-    const root2 = win32.join(base, "cxstatusline");
+    const base = input.localAppData ?? win322.join(input.home, "AppData", "Local");
+    const root2 = win322.join(base, "cxstatusline");
     return {
       root: root2,
-      adapter: win32.join(root2, "codex-cx.exe"),
-      renderer: win32.join(root2, "renderer.mjs"),
-      manifest: win32.join(root2, "install.json"),
-      launcher: win32.join(root2, "bin", "cdx.exe")
+      adapter: win322.join(root2, "codex-cx.exe"),
+      renderer: win322.join(root2, "renderer.mjs"),
+      manifest: win322.join(root2, "install.json"),
+      launcher: win322.join(root2, "bin", "cdx.exe")
     };
   }
-  const root = posix.join(input.home, ".local", "share", "cxstatusline");
+  const root = posix2.join(input.home, ".local", "share", "cxstatusline");
   return {
     root,
-    adapter: posix.join(root, "codex-cx"),
-    renderer: posix.join(root, "renderer.mjs"),
-    manifest: posix.join(root, "install.json"),
-    launcher: posix.join(input.home, ".local", "bin", "cdx")
+    adapter: posix2.join(root, "codex-cx"),
+    renderer: posix2.join(root, "renderer.mjs"),
+    manifest: posix2.join(root, "install.json"),
+    launcher: posix2.join(input.home, ".local", "bin", "cdx")
   };
 }
 function adapterAssetName(platform, arch) {
@@ -191,8 +228,10 @@ function adapterAssetName(platform, arch) {
 }
 
 // src/installer/release.ts
-async function requireResponse(response, label) {
-  if (!response.ok) throw new Error(label + " failed (" + response.status + ")");
+async function requireResponse(response, label, url) {
+  if (!response.ok) {
+    throw new Error(label + " failed (" + response.status + ") at " + url);
+  }
   return response;
 }
 async function fetchReleaseAssets(options) {
@@ -204,7 +243,7 @@ async function fetchReleaseAssets(options) {
       "User-Agent": "cxstatusline-installer"
     }
   });
-  await requireResponse(apiResponse, "GitHub release request");
+  await requireResponse(apiResponse, "GitHub release request", apiUrl);
   const release = await apiResponse.json();
   if (typeof release.tag_name !== "string" || !Array.isArray(release.assets)) {
     throw new Error("invalid GitHub release response");
@@ -223,8 +262,12 @@ async function fetchReleaseAssets(options) {
         headers: { "User-Agent": "cxstatusline-installer" }
       })
     ]);
-    await requireResponse(binaryResponse, "asset download " + name);
-    await requireResponse(checksumResponse, "checksum download " + name);
+    await requireResponse(binaryResponse, "asset download " + name, binaryAsset.browser_download_url);
+    await requireResponse(
+      checksumResponse,
+      "checksum download " + name,
+      checksumAsset.browser_download_url
+    );
     const bytes = new Uint8Array(await binaryResponse.arrayBuffer());
     const checksum = parseChecksum(await checksumResponse.text());
     verifySha256(bytes, checksum);
@@ -245,7 +288,7 @@ var PATH_BLOCK_START = "# BEGIN cxstatusline PATH";
 var PATH_BLOCK_END = "# END cxstatusline PATH";
 async function exists(path) {
   try {
-    await access(path);
+    await access2(path);
     return true;
   } catch (error) {
     if (error.code === "ENOENT") return false;
@@ -264,14 +307,46 @@ async function readManifest(path) {
   const text = await readText(path);
   return text ? JSON.parse(text) : void 0;
 }
+function expectedOwnedPaths(paths) {
+  return [paths.adapter, paths.renderer, paths.launcher];
+}
+function validateManifest(manifest, paths, expectedConfigPath, home, platform) {
+  const expected = expectedOwnedPaths(paths);
+  const actual = manifest.ownedPaths;
+  const exactOwnedPaths = Array.isArray(actual) && actual.length === expected.length && expected.every((path) => actual.includes(path));
+  if (manifest.schemaVersion !== 1 || manifest.pluginVersion !== PLUGIN_VERSION || manifest.upstreamCodexCommit !== UPSTREAM_CODEX_COMMIT || typeof manifest.releaseTag !== "string" || manifest.releaseTag.length === 0 || !exactOwnedPaths || manifest.codexConfigPath !== expectedConfigPath || typeof manifest.nodePath !== "string" || manifest.nodePath.length === 0 || !/^[a-f0-9]{64}$/i.test(manifest.checksums?.adapter ?? "") || !/^[a-f0-9]{64}$/i.test(manifest.checksums?.renderer ?? "")) {
+    throw new Error("cxstatusline ownership manifest does not match this installation");
+  }
+  if (manifest.profilePath) assertProfileInsideHome(manifest.profilePath, home, platform);
+}
+function assertProfileInsideHome(profilePath, home, platform) {
+  const pathApi = platform === "win32" ? win323 : posix3;
+  const relative = pathApi.relative(pathApi.resolve(home), pathApi.resolve(profilePath));
+  if (!relative || relative === ".." || relative.startsWith(".." + pathApi.sep) || pathApi.isAbsolute(relative)) {
+    throw new Error("profile path is outside HOME: " + profilePath);
+  }
+}
 async function atomicWrite(path, data, mode) {
   await mkdir2(dirname2(path), { recursive: true });
   const temporary = path + ".tmp-" + process.pid;
   await rm2(temporary, { force: true });
   await writeFile2(temporary, data, mode === void 0 ? void 0 : { mode });
   if (mode !== void 0) await chmod2(temporary, mode);
-  await rm2(path, { force: true });
-  await rename2(temporary, path);
+  if (process.platform !== "win32") {
+    await rename2(temporary, path);
+    return;
+  }
+  const backup = path + ".bak-" + process.pid;
+  await rm2(backup, { force: true });
+  const hadTarget = await exists(path);
+  if (hadTarget) await rename2(path, backup);
+  try {
+    await rename2(temporary, path);
+    await rm2(backup, { force: true });
+  } catch (error) {
+    if (hadTarget && await exists(backup)) await rename2(backup, path);
+    throw error;
+  }
 }
 async function snapshot(path) {
   try {
@@ -292,7 +367,28 @@ async function install(options) {
   const paths = resolveInstallPaths(options);
   const configPath = codexConfigPath(options.home, options.codexHome);
   const previousManifest = await readManifest(paths.manifest);
+  if (previousManifest) {
+    validateManifest(previousManifest, paths, configPath, options.home, options.platform);
+  } else {
+    for (const path of expectedOwnedPaths(paths)) {
+      if (await exists(path)) {
+        if (path === paths.launcher) {
+          throw new Error("refusing to overwrite existing cdx: " + path);
+        }
+        throw new Error("refusing to overwrite unowned installation file: " + path);
+      }
+    }
+  }
   const ownedPaths = previousManifest?.ownedPaths ?? [];
+  const resolvedCdx = await findCommandOnPath(
+    "cdx",
+    options.pathValue ?? process.env.PATH ?? "",
+    options.platform
+  );
+  const pathApi = options.platform === "win32" ? win323 : posix3;
+  if (resolvedCdx && pathApi.resolve(resolvedCdx) !== pathApi.resolve(paths.launcher)) {
+    throw new Error("another cdx command is already on PATH: " + resolvedCdx);
+  }
   if (await exists(paths.launcher) && !ownedPaths.includes(paths.launcher)) {
     throw new Error("refusing to overwrite existing cdx: " + paths.launcher);
   }
@@ -301,6 +397,17 @@ async function install(options) {
     originalConfig,
     renderCodexBlock(options.nodePath, paths.renderer)
   );
+  const profilePath = options.profilePath ?? previousManifest?.profilePath;
+  if (profilePath) assertProfileInsideHome(profilePath, options.home, options.platform);
+  if (previousManifest?.profilePath) {
+    if (!await exists(previousManifest.profilePath)) {
+      throw new Error("managed shell profile is missing: " + previousManifest.profilePath);
+    }
+    const previousProfile = await readText(previousManifest.profilePath);
+    if (removeManagedBlock(previousProfile, PATH_BLOCK_START, PATH_BLOCK_END) === previousProfile) {
+      throw new Error("managed PATH block is missing from shell profile");
+    }
+  }
   let originalProfile;
   let nextProfile;
   if (options.profilePath) {
@@ -313,9 +420,13 @@ async function install(options) {
       renderPathBlock(options.shell, dirname2(paths.launcher)).replace(PATH_BLOCK_START + "\n", "").replace("\n" + PATH_BLOCK_END, "")
     );
   }
+  const oldProfilePath = previousManifest?.profilePath !== profilePath ? previousManifest?.profilePath : void 0;
+  const oldProfile = oldProfilePath ? await readText(oldProfilePath) : void 0;
+  const cleanedOldProfile = oldProfile === void 0 ? void 0 : removeManagedBlock(oldProfile, PATH_BLOCK_START, PATH_BLOCK_END);
   const release = await fetchReleaseAssets(options);
   const tracked = [paths.adapter, paths.renderer, paths.launcher, paths.manifest, configPath];
-  if (options.profilePath) tracked.push(options.profilePath);
+  if (profilePath) tracked.push(profilePath);
+  if (oldProfilePath) tracked.push(oldProfilePath);
   const before = /* @__PURE__ */ new Map();
   for (const path of tracked) before.set(path, await snapshot(path));
   try {
@@ -331,6 +442,9 @@ async function install(options) {
     if (options.profilePath && nextProfile !== void 0) {
       await atomicWrite(options.profilePath, nextProfile);
     }
+    if (oldProfilePath && cleanedOldProfile !== void 0) {
+      await atomicWrite(oldProfilePath, cleanedOldProfile);
+    }
     const manifest = {
       schemaVersion: 1,
       pluginVersion: PLUGIN_VERSION,
@@ -340,9 +454,10 @@ async function install(options) {
         adapter: release.adapter.checksum,
         renderer: release.renderer.checksum
       },
-      ownedPaths: [paths.adapter, paths.renderer, paths.launcher],
+      ownedPaths: expectedOwnedPaths(paths),
       codexConfigPath: configPath,
-      ...options.profilePath ? { profilePath: options.profilePath } : {}
+      nodePath: options.nodePath,
+      ...profilePath ? { profilePath } : {}
     };
     await atomicWrite(paths.manifest, JSON.stringify(manifest, null, 2) + "\n", 384);
   } catch (error) {
@@ -350,7 +465,8 @@ async function install(options) {
     await restore(paths.renderer, before.get(paths.renderer), 420);
     await restore(paths.launcher, before.get(paths.launcher), options.platform === "win32" ? void 0 : 493);
     await restore(configPath, before.get(configPath), 384);
-    if (options.profilePath) await restore(options.profilePath, before.get(options.profilePath));
+    if (profilePath) await restore(profilePath, before.get(profilePath));
+    if (oldProfilePath) await restore(oldProfilePath, before.get(oldProfilePath));
     await restore(paths.manifest, before.get(paths.manifest), 384);
     throw error;
   }
@@ -387,52 +503,247 @@ async function doctor(options) {
       detail: path
     });
   }
+  let manifest;
+  try {
+    const candidate = await readManifest(paths.manifest);
+    if (candidate) {
+      validateManifest(candidate, paths, configPath, options.home, options.platform);
+      manifest = candidate;
+      checks.push({
+        id: "manifest-integrity",
+        status: "pass",
+        detail: candidate.releaseTag + " / plugin " + candidate.pluginVersion
+      });
+    }
+  } catch (error) {
+    checks.push({
+      id: "manifest-integrity",
+      status: "fail",
+      detail: error instanceof Error ? error.message : String(error)
+    });
+  }
+  if (manifest) {
+    for (const [id, path, checksum] of [
+      ["adapter-checksum", paths.adapter, manifest.checksums.adapter],
+      ["renderer-checksum", paths.renderer, manifest.checksums.renderer]
+    ]) {
+      try {
+        verifySha256(await readFile(path), checksum);
+        checks.push({ id, status: "pass", detail: path });
+      } catch (error) {
+        checks.push({
+          id,
+          status: "fail",
+          detail: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    if (manifest.profilePath) {
+      try {
+        const profile = await readFile(manifest.profilePath, "utf8");
+        if (removeManagedBlock(profile, PATH_BLOCK_START, PATH_BLOCK_END) === profile) {
+          throw new Error("managed PATH block is missing");
+        }
+        checks.push({
+          id: "profile-block",
+          status: "pass",
+          detail: manifest.profilePath
+        });
+      } catch (error) {
+        checks.push({
+          id: "profile-block",
+          status: "fail",
+          detail: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    try {
+      const launcher = await readFile(paths.launcher);
+      if (options.platform === "win32") {
+        verifySha256(launcher, manifest.checksums.adapter);
+      } else if (launcher.toString("utf8") !== renderUnixLauncher(paths.adapter)) {
+        throw new Error("launcher content mismatch");
+      }
+      checks.push({ id: "launcher-integrity", status: "pass", detail: paths.launcher });
+    } catch (error) {
+      checks.push({
+        id: "launcher-integrity",
+        status: "fail",
+        detail: error instanceof Error ? error.message : String(error)
+      });
+    }
+    const execution = spawnSync(paths.adapter, ["--version"], {
+      encoding: "utf8",
+      timeout: 5e3,
+      windowsHide: true
+    });
+    if (execution.status === 0) {
+      checks.push({
+        id: "adapter-execution",
+        status: "pass",
+        detail: (execution.stdout || execution.stderr).trim() || paths.adapter
+      });
+    } else {
+      checks.push({
+        id: "adapter-execution",
+        status: "fail",
+        detail: execution.error?.message || execution.stderr.trim() || "adapter exited unsuccessfully"
+      });
+    }
+  }
   const config = await readText(configPath);
   checks.push({
     id: "codex-config",
     status: config.includes(CODEX_BLOCK_START) ? "pass" : "fail",
     detail: configPath
   });
-  const separator = options.platform === "win32" ? ";" : delimiter;
+  if (manifest) {
+    const exactBody = renderCodexBlock(manifest.nodePath, paths.renderer);
+    checks.push({
+      id: "codex-config-content",
+      status: hasExactCodexBlock(config, exactBody) ? "pass" : "fail",
+      detail: configPath
+    });
+  }
+  const separator = options.platform === "win32" ? ";" : delimiter2;
   const pathEntries = (options.pathValue ?? process.env.PATH ?? "").split(separator);
   checks.push({
     id: "path",
     status: pathEntries.includes(dirname2(paths.launcher)) ? "pass" : "warn",
     detail: dirname2(paths.launcher)
   });
+  const resolvedCdx = await findCommandOnPath(
+    "cdx",
+    options.pathValue ?? process.env.PATH ?? "",
+    options.platform
+  );
+  const pathApi = options.platform === "win32" ? win323 : posix3;
+  checks.push({
+    id: "cdx-resolution",
+    status: resolvedCdx && pathApi.resolve(resolvedCdx) === pathApi.resolve(paths.launcher) ? "pass" : "warn",
+    detail: resolvedCdx ?? "cdx is not currently resolved from PATH"
+  });
+  const resolvedCodex = await findCommandOnPath(
+    "codex",
+    options.pathValue ?? process.env.PATH ?? "",
+    options.platform
+  );
+  if (!resolvedCodex) {
+    checks.push({
+      id: "official-codex",
+      status: "warn",
+      detail: "official codex is not currently resolved from PATH"
+    });
+  } else {
+    const codexVersion = spawnSync(resolvedCodex, ["--version"], {
+      encoding: "utf8",
+      timeout: 5e3,
+      windowsHide: true
+    });
+    checks.push({
+      id: "official-codex",
+      status: codexVersion.status === 0 ? "pass" : "warn",
+      detail: codexVersion.status === 0 ? (codexVersion.stdout || codexVersion.stderr).trim() : codexVersion.error?.message || "official codex did not return a version"
+    });
+  }
   return checks;
+}
+async function inspectUninstall(options) {
+  const paths = resolveInstallPaths(options);
+  const manifest = await readManifest(paths.manifest);
+  if (!manifest) {
+    return {
+      manifestPath: paths.manifest,
+      status: "missing",
+      detail: "cxstatusline ownership manifest not found"
+    };
+  }
+  try {
+    validateManifest(
+      manifest,
+      paths,
+      codexConfigPath(options.home, options.codexHome),
+      options.home,
+      options.platform
+    );
+    return {
+      manifestPath: paths.manifest,
+      status: "ready",
+      detail: manifest.releaseTag + " owns " + manifest.ownedPaths.length + " installation files"
+    };
+  } catch (error) {
+    return {
+      manifestPath: paths.manifest,
+      status: "invalid",
+      detail: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 async function uninstall(options) {
   const paths = resolveInstallPaths(options);
   const manifest = await readManifest(paths.manifest);
   if (!manifest) throw new Error("cxstatusline ownership manifest not found");
-  const expectedOwned = [paths.adapter, paths.renderer, paths.launcher];
-  if (expectedOwned.some((path) => !manifest.ownedPaths.includes(path))) {
-    throw new Error("cxstatusline ownership manifest does not match this installation");
-  }
+  validateManifest(
+    manifest,
+    paths,
+    codexConfigPath(options.home, options.codexHome),
+    options.home,
+    options.platform
+  );
   if (await exists(paths.adapter)) {
     verifySha256(await readFile(paths.adapter), manifest.checksums.adapter);
   }
   if (await exists(paths.renderer)) {
     verifySha256(await readFile(paths.renderer), manifest.checksums.renderer);
   }
-  if (options.platform !== "win32" && await exists(paths.launcher)) {
-    const launcher = await readFile(paths.launcher, "utf8");
-    if (launcher !== renderUnixLauncher(paths.adapter)) {
+  if (await exists(paths.launcher)) {
+    const launcher = await readFile(paths.launcher);
+    if (options.platform === "win32") {
+      verifySha256(launcher, manifest.checksums.adapter);
+    } else if (launcher.toString("utf8") !== renderUnixLauncher(paths.adapter)) {
       throw new Error("refusing to remove modified cdx launcher");
     }
   }
-  const config = await readText(manifest.codexConfigPath);
-  await atomicWrite(manifest.codexConfigPath, removeCodexConfig(config), 384);
-  if (manifest.profilePath) {
-    const profile = await readText(manifest.profilePath);
-    await atomicWrite(
-      manifest.profilePath,
-      removeManagedBlock(profile, PATH_BLOCK_START, PATH_BLOCK_END)
-    );
+  if (!await exists(manifest.codexConfigPath)) {
+    throw new Error("managed Codex config file is missing");
   }
-  for (const path of manifest.ownedPaths) await rm2(path, { force: true });
-  await rm2(paths.manifest, { force: true });
+  const config = await readText(manifest.codexConfigPath);
+  const expectedBlock = renderCodexBlock(manifest.nodePath, paths.renderer);
+  if (!hasExactCodexBlock(config, expectedBlock)) {
+    throw new Error("managed Codex config does not match the ownership manifest");
+  }
+  const nextConfig = removeCodexConfig(config);
+  let profile;
+  let nextProfile;
+  if (manifest.profilePath) {
+    if (!await exists(manifest.profilePath)) throw new Error("managed shell profile is missing");
+    profile = await readText(manifest.profilePath);
+    nextProfile = removeManagedBlock(profile, PATH_BLOCK_START, PATH_BLOCK_END);
+    if (nextProfile === profile) throw new Error("managed PATH block is missing from shell profile");
+  }
+  const tracked = [
+    manifest.codexConfigPath,
+    ...expectedOwnedPaths(paths),
+    paths.manifest,
+    ...manifest.profilePath ? [manifest.profilePath] : []
+  ];
+  const before = /* @__PURE__ */ new Map();
+  for (const path of tracked) before.set(path, await snapshot(path));
+  try {
+    await atomicWrite(manifest.codexConfigPath, nextConfig, 384);
+    if (manifest.profilePath && nextProfile !== void 0) {
+      await atomicWrite(manifest.profilePath, nextProfile);
+    }
+    for (const path of expectedOwnedPaths(paths)) await rm2(path, { force: true });
+    await rm2(paths.manifest, { force: true });
+  } catch (error) {
+    await Promise.allSettled(tracked.map((path) => restore(
+      path,
+      before.get(path),
+      path === paths.adapter || path === paths.launcher ? options.platform === "win32" ? void 0 : 493 : path === manifest.codexConfigPath || path === paths.manifest ? 384 : void 0
+    )));
+    throw error;
+  }
   try {
     await rmdir(paths.root);
   } catch (error) {
@@ -474,6 +785,17 @@ function parseInstallArgs(args) {
     } else {
       throw new Error("unknown option: " + argument);
     }
+  }
+  if (yes && !["install", "uninstall"].includes(command ?? "")) {
+    throw new Error("--yes is only valid with install or uninstall");
+  }
+  if ((profilePath || shell) && command !== "install") {
+    throw new Error("--profile is only valid with install");
+  }
+  if (profilePath && !shell) throw new Error("--profile requires --shell");
+  if (shell && !profilePath) throw new Error("--shell requires --profile");
+  if (uninstallPlan && command !== "plan") {
+    throw new Error("--uninstall is only valid with plan");
   }
   return {
     command,
@@ -517,6 +839,7 @@ async function main() {
   };
   if (args.command === "plan") {
     const paths = resolveInstallPaths(base);
+    const ownership = args.uninstallPlan ? await inspectUninstall(base) : void 0;
     print({
       action: args.uninstallPlan ? "uninstall" : "install",
       officialCodexPreserved: true,
@@ -524,7 +847,8 @@ async function main() {
       paths,
       codexConfig: codexConfigPath(home, codexHome),
       network: args.uninstallPlan ? [] : ["api.github.com", "github.com"],
-      profile: args.profilePath ?? null
+      profile: args.profilePath ?? null,
+      ...ownership ? { ownership } : {}
     }, args.json);
     return;
   }

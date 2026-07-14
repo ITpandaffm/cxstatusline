@@ -1,5 +1,6 @@
-import { chmod, copyFile, lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { constants } from "node:fs";
+import { access, chmod, copyFile, lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { delimiter, dirname, posix, win32 } from "node:path";
 
 export interface CreateLauncherOptions {
   platform: string;
@@ -26,6 +27,31 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+export async function findCommandOnPath(
+  command: string,
+  pathValue: string,
+  platform: string
+): Promise<string | undefined> {
+  const pathApi = platform === "win32" ? win32 : posix;
+  const separator = platform === "win32" ? ";" : delimiter;
+  const extensions = platform === "win32"
+    ? [".exe", ".cmd", ".bat", ".com", ""]
+    : [""];
+  for (const directory of pathValue.split(separator).filter(Boolean)) {
+    for (const extension of extensions) {
+      const candidate = pathApi.join(directory, command + extension);
+      try {
+        await access(candidate, platform === "win32" ? constants.F_OK : constants.X_OK);
+        return candidate;
+      } catch (error) {
+        if (["ENOENT", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) continue;
+        throw error;
+      }
+    }
+  }
+  return undefined;
+}
+
 export async function createLauncher(options: CreateLauncherOptions): Promise<void> {
   const exists = await pathExists(options.launcher);
   if (exists && !options.ownedPaths.includes(options.launcher)) {
@@ -42,8 +68,20 @@ export async function createLauncher(options: CreateLauncherOptions): Promise<vo
     await chmod(temporary, 0o755);
   }
 
-  if (exists) await rm(options.launcher, { force: true });
-  await rename(temporary, options.launcher);
+  if (options.platform !== "win32") {
+    await rename(temporary, options.launcher);
+    return;
+  }
+  const backup = options.launcher + ".bak-" + process.pid;
+  await rm(backup, { force: true });
+  if (exists) await rename(options.launcher, backup);
+  try {
+    await rename(temporary, options.launcher);
+    await rm(backup, { force: true });
+  } catch (error) {
+    if (exists && await pathExists(backup)) await rename(backup, options.launcher);
+    throw error;
+  }
 }
 
 export type ShellKind = "zsh" | "bash" | "fish" | "powershell";

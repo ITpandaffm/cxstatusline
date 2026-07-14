@@ -16,6 +16,10 @@ cdx      Codex with the cxstatusline adapter
 
 Official `codex` is never overwritten or aliased.
 
+Requirements: Node.js 20 or newer and an existing official Codex CLI installation. Release
+adapters support macOS (Apple Silicon and Intel), Windows x64, and Linux x64/ARM64 with an Ubuntu
+22.04 / glibc 2.35 compatibility baseline.
+
 ## Install from the Codex marketplace
 
 Add this repository as a marketplace and install the plugin:

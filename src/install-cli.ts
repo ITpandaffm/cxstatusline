@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { doctor, install, uninstall } from "./installer/commands.js";
+import { doctor, inspectUninstall, install, uninstall } from "./installer/commands.js";
 import { codexConfigPath } from "./installer/codex-config.js";
 import { resolveInstallPaths } from "./installer/paths.js";
 import type { ShellKind } from "./installer/launcher.js";
@@ -54,6 +54,18 @@ export function parseInstallArgs(args: string[]): ParsedInstallArgs {
     }
   }
 
+  if (yes && !["install", "uninstall"].includes(command ?? "")) {
+    throw new Error("--yes is only valid with install or uninstall");
+  }
+  if ((profilePath || shell) && command !== "install") {
+    throw new Error("--profile is only valid with install");
+  }
+  if (profilePath && !shell) throw new Error("--profile requires --shell");
+  if (shell && !profilePath) throw new Error("--shell requires --profile");
+  if (uninstallPlan && command !== "plan") {
+    throw new Error("--uninstall is only valid with plan");
+  }
+
   return {
     command: command as InstallCommand,
     json,
@@ -102,6 +114,7 @@ async function main(): Promise<void> {
 
   if (args.command === "plan") {
     const paths = resolveInstallPaths(base);
+    const ownership = args.uninstallPlan ? await inspectUninstall(base) : undefined;
     print({
       action: args.uninstallPlan ? "uninstall" : "install",
       officialCodexPreserved: true,
@@ -109,7 +122,8 @@ async function main(): Promise<void> {
       paths,
       codexConfig: codexConfigPath(home, codexHome),
       network: args.uninstallPlan ? [] : ["api.github.com", "github.com"],
-      profile: args.profilePath ?? null
+      profile: args.profilePath ?? null,
+      ...(ownership ? { ownership } : {})
     }, args.json);
     return;
   }

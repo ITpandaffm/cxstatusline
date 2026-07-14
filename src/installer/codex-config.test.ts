@@ -33,6 +33,17 @@ test("rejects an unmanaged status command", () => {
   );
 });
 
+test("rejects an unmanaged duplicate beside the managed block", () => {
+  const managed = updateCodexConfig("model = \"gpt\"\n", "owned");
+  assert.throws(
+    () => updateCodexConfig(
+      managed + "\n[tui.status_line_command]\nargv = [\"other\"]\n",
+      "owned"
+    ),
+    /unmanaged \[tui\.status_line_command\]/
+  );
+});
+
 test("updates and removes only the managed Codex config", () => {
   const updated = updateCodexConfig("model = \"gpt\"\n", "owned = true");
   assert.match(updated, /model = "gpt"/);

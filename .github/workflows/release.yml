@@ -26,6 +26,13 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run validate:plugin
+      - name: Validate plugin through Codex CLI
+        shell: bash
+        run: |
+          npm install --global @openai/codex@0.144.1
+          mkdir -p "$RUNNER_TEMP/codex-home"
+          CODEX_HOME="$RUNNER_TEMP/codex-home" codex plugin marketplace add "$GITHUB_WORKSPACE"
+          CODEX_HOME="$RUNNER_TEMP/codex-home" codex plugin add cxstatusline@cxstatusline --json
       - run: npm run build:plugin
       - name: Prepare renderer and npm artifacts
         shell: bash
@@ -51,10 +58,10 @@ jobs:
           - runner: macos-15-intel
             asset: codex-cx-darwin-x64
             executable: upstream/codex-rs/target/release/codex
-          - runner: ubuntu-24.04
+          - runner: ubuntu-22.04
             asset: codex-cx-linux-x64
             executable: upstream/codex-rs/target/release/codex
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-22.04-arm
             asset: codex-cx-linux-arm64
             executable: upstream/codex-rs/target/release/codex
           - runner: windows-2025

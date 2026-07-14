@@ -76,7 +76,7 @@ test("fails on GitHub API errors without hiding the status", async () => {
       platform: "darwin",
       arch: "arm64"
     }),
-    /GitHub release request failed \(503\)/
+    /GitHub release request failed \(503\).*api\.github\.com/
   );
 });
 

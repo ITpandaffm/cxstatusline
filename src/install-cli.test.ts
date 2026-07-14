@@ -50,4 +50,8 @@ test("parses an uninstall plan", () => {
 test("rejects unknown commands and flags", () => {
   assert.throws(() => parseInstallArgs(["unknown"]), /unknown command: unknown/);
   assert.throws(() => parseInstallArgs(["doctor", "--force"]), /unknown option: --force/);
+  assert.throws(() => parseInstallArgs(["doctor", "--yes"]), /--yes is only valid/);
+  assert.throws(() => parseInstallArgs(["plan", "--profile", ".zshrc"]), /--profile is only valid/);
+  assert.throws(() => parseInstallArgs(["install", "--profile", ".zshrc"]), /--profile requires --shell/);
+  assert.throws(() => parseInstallArgs(["uninstall", "--uninstall"]), /--uninstall is only valid/);
 });

@@ -20,10 +20,16 @@ export function renderCodexBlock(nodePath: string, rendererPath: string): string
 }
 
 export function updateCodexConfig(text: string, body: string): string {
-  if (!text.includes(CODEX_BLOCK_START) && /^\s*\[tui\.status_line_command\]\s*$/m.test(text)) {
+  const unmanagedText = removeManagedBlock(text, CODEX_BLOCK_START, CODEX_BLOCK_END);
+  if (/^\s*\[tui\.status_line_command\]\s*$/m.test(unmanagedText)) {
     throw new Error("unmanaged [tui.status_line_command] already exists");
   }
   return upsertManagedBlock(text, CODEX_BLOCK_START, CODEX_BLOCK_END, body);
+}
+
+export function hasExactCodexBlock(text: string, body: string): boolean {
+  const expected = CODEX_BLOCK_START + "\n" + body + "\n" + CODEX_BLOCK_END;
+  return text.includes(expected);
 }
 
 export function removeCodexConfig(text: string): string {

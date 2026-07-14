@@ -32,8 +32,10 @@ interface GitHubRelease {
   assets: GitHubAsset[];
 }
 
-async function requireResponse(response: Response, label: string): Promise<Response> {
-  if (!response.ok) throw new Error(label + " failed (" + response.status + ")");
+async function requireResponse(response: Response, label: string, url: string): Promise<Response> {
+  if (!response.ok) {
+    throw new Error(label + " failed (" + response.status + ") at " + url);
+  }
   return response;
 }
 
@@ -46,7 +48,7 @@ export async function fetchReleaseAssets(options: FetchReleaseOptions): Promise<
       "User-Agent": "cxstatusline-installer"
     }
   });
-  await requireResponse(apiResponse, "GitHub release request");
+  await requireResponse(apiResponse, "GitHub release request", apiUrl);
   const release = await apiResponse.json() as GitHubRelease;
   if (typeof release.tag_name !== "string" || !Array.isArray(release.assets)) {
     throw new Error("invalid GitHub release response");
@@ -67,8 +69,12 @@ export async function fetchReleaseAssets(options: FetchReleaseOptions): Promise<
         headers: { "User-Agent": "cxstatusline-installer" }
       })
     ]);
-    await requireResponse(binaryResponse, "asset download " + name);
-    await requireResponse(checksumResponse, "checksum download " + name);
+    await requireResponse(binaryResponse, "asset download " + name, binaryAsset.browser_download_url);
+    await requireResponse(
+      checksumResponse,
+      "checksum download " + name,
+      checksumAsset.browser_download_url
+    );
     const bytes = new Uint8Array(await binaryResponse.arrayBuffer());
     const checksum = parseChecksum(await checksumResponse.text());
     verifySha256(bytes, checksum);

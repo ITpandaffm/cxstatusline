@@ -18,10 +18,12 @@ Use this workflow when the user asks to install, configure, or update cxstatusli
 
 4. Show the planned download, install, Codex config, launcher, and optional shell-profile changes.
 5. Check whether `~/.local/bin` (or the Windows launcher directory from the plan) is already on
-   `PATH`. If it is not, identify the active shell and propose exactly one owned profile block:
+   `PATH`. If it is not, identify the active and login shell, inspect which startup files already
+   exist, and propose exactly one owned profile block:
    - Zsh: `~/.zshrc` with `--shell zsh`
-   - Bash on macOS: `~/.bash_profile` with `--shell bash`
-   - Bash elsewhere: `~/.bashrc` with `--shell bash`
+   - Bash: prefer an existing startup file appropriate to how Bash is launched (`~/.bash_profile`,
+     `~/.bash_login`, `~/.profile`, or `~/.bashrc`). If none exists, explain which one will be
+     created and why before asking for approval.
    - Fish: `~/.config/fish/config.fish` with `--shell fish`
    - PowerShell: the user's `$PROFILE` path with `--shell powershell`
 6. Ask for approval before any network request or filesystem or profile mutation.
