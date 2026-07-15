@@ -8,4 +8,12 @@ test("checks out upstream Codex without platform line-ending conversion", async 
     workflow,
     /git -c core\.autocrlf=false clone --filter=blob:none https:\/\/github\.com\/openai\/codex\.git upstream/
   );
+  assert.match(
+    workflow,
+    /git show "HEAD:patches\/codex-status-line-command\.patch" > "\$RUNNER_TEMP\/codex-status-line-command\.patch"/
+  );
+  assert.match(
+    workflow,
+    /git -C upstream apply "\$RUNNER_TEMP\/codex-status-line-command\.patch"/
+  );
 });

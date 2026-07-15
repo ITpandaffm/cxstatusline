@@ -78,7 +78,8 @@ jobs:
         run: |
           git -c core.autocrlf=false clone --filter=blob:none https://github.com/openai/codex.git upstream
           git -C upstream checkout "$CODEX_REVISION"
-          git -C upstream apply "$GITHUB_WORKSPACE/patches/codex-status-line-command.patch"
+          git show "HEAD:patches/codex-status-line-command.patch" > "$RUNNER_TEMP/codex-status-line-command.patch"
+          git -C upstream apply "$RUNNER_TEMP/codex-status-line-command.patch"
       - name: Build patched adapter
         shell: bash
         working-directory: upstream/codex-rs
