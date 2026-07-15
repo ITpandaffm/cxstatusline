@@ -12,6 +12,7 @@ permissions:
 env:
   CODEX_REVISION: d7ba5ff9553a6aa0898a8e3bd5cb3bc00d0c9ddf
   CARGO_INCREMENTAL: "0"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_PROFILE_RELEASE_DEBUG: "0"
 
 jobs:
