@@ -17,4 +17,8 @@ test("checks out upstream Codex without platform line-ending conversion", async 
     workflow,
     /git -C upstream apply "\$RUNNER_TEMP\/codex-status-line-command\.patch"/
   );
+  assert.match(
+    workflow,
+    /gh release create "\$GITHUB_REF_NAME" release-assets\/\* --repo "\$GITHUB_REPOSITORY"/
+  );
 });
