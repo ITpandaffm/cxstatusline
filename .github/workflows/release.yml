@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CODEX_REVISION: d7ba5ff9553a6aa0898a8e3bd5cb3bc00d0c9ddf
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
+
+jobs:
+  renderer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run validate:plugin
+      - name: Validate plugin through Codex CLI
+        shell: bash
+        run: |
+          npm install --global @openai/codex@0.144.1
+          mkdir -p "$RUNNER_TEMP/codex-home"
+          CODEX_HOME="$RUNNER_TEMP/codex-home" codex plugin marketplace add "$GITHUB_WORKSPACE"
+          CODEX_HOME="$RUNNER_TEMP/codex-home" codex plugin add cxstatusline@cxstatusline --json
+      - run: npm run build:plugin
+      - name: Prepare renderer and npm artifacts
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp release/cxstatusline-renderer.mjs release-assets/
+          node scripts/write-checksum.mjs release-assets/cxstatusline-renderer.mjs
+          npm pack --pack-destination release-assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: renderer
+          path: release-assets/*
+          if-no-files-found: error
+
+  adapter:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            asset: codex-cx-darwin-arm64
+            executable: upstream/codex-rs/target/release/codex
+          - runner: macos-15-intel
+            asset: codex-cx-darwin-x64
+            executable: upstream/codex-rs/target/release/codex
+          - runner: ubuntu-22.04
+            asset: codex-cx-linux-x64
+            executable: upstream/codex-rs/target/release/codex
+          - runner: ubuntu-22.04-arm
+            asset: codex-cx-linux-arm64
+            executable: upstream/codex-rs/target/release/codex
+          - runner: windows-2025
+            asset: codex-cx-windows-x64.exe
+            executable: upstream/codex-rs/target/release/codex.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check out and patch Codex
+        shell: bash
+        run: |
+          git clone --filter=blob:none https://github.com/openai/codex.git upstream
+          git -C upstream checkout "$CODEX_REVISION"
+          git -C upstream apply "$GITHUB_WORKSPACE/patches/codex-status-line-command.patch"
+      - name: Build patched adapter
+        shell: bash
+        working-directory: upstream/codex-rs
+        run: cargo build --release -p codex-cli --bin codex
+      - name: Smoke-test native adapter through cdx
+        shell: bash
+        run: |
+          smoke_home="$RUNNER_TEMP/cxstatusline-smoke-home"
+          mkdir -p "$smoke_home/.codex" "$smoke_home/bin"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "${{ matrix.executable }}" "$smoke_home/bin/cdx.exe"
+            HOME="$smoke_home" USERPROFILE="$smoke_home" CODEX_HOME="$smoke_home/.codex" \
+              "$smoke_home/bin/cdx.exe" --version
+          else
+            adapter_path="$GITHUB_WORKSPACE/${{ matrix.executable }}"
+            printf '#!/bin/sh\nexec %s "$@"\n' "'${adapter_path}'" > "$smoke_home/bin/cdx"
+            chmod +x "$smoke_home/bin/cdx"
+            HOME="$smoke_home" CODEX_HOME="$smoke_home/.codex" "$smoke_home/bin/cdx" --version
+          fi
+      - name: Prepare verified adapter asset
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp "${{ matrix.executable }}" "release-assets/${{ matrix.asset }}"
+          chmod +x "release-assets/${{ matrix.asset }}"
+          node scripts/write-checksum.mjs "release-assets/${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [renderer, adapter]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --generate-notes --title "$GITHUB_REF_NAME"

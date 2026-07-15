@@ -1,0 +1,20 @@
+{
+  "name": "cxstatusline",
+  "interface": {
+    "displayName": "cxstatusline"
+  },
+  "plugins": [
+    {
+      "name": "cxstatusline",
+      "source": {
+        "source": "local",
+        "path": "./plugins/cxstatusline"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

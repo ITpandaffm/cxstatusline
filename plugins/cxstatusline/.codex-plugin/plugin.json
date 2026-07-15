@@ -1,0 +1,24 @@
+{
+  "name": "cxstatusline",
+  "version": "0.2.0",
+  "description": "Install and manage a safe multi-line statusline for Codex CLI.",
+  "author": {
+    "name": "ITpandaffm",
+    "url": "https://github.com/ITpandaffm"
+  },
+  "homepage": "https://github.com/ITpandaffm/cxstatusline",
+  "repository": "https://github.com/ITpandaffm/cxstatusline",
+  "license": "MIT",
+  "keywords": ["codex", "statusline", "terminal"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "cxstatusline",
+    "shortDescription": "Multi-line Codex CLI statusline",
+    "longDescription": "Install, diagnose, update, and remove the cxstatusline Codex adapter.",
+    "developerName": "ITpandaffm",
+    "category": "Developer Tools",
+    "capabilities": ["Install", "Configure", "Diagnose"],
+    "websiteURL": "https://github.com/ITpandaffm/cxstatusline",
+    "defaultPrompt": ["Set up cxstatusline and the cdx command."]
+  }
+}
