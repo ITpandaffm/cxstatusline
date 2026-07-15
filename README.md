@@ -1,13 +1,25 @@
 # cxstatusline
 
-`cxstatusline` adds a safe, configurable multi-line statusline to OpenAI Codex CLI.
+OpenAI Codex CLI's built-in footer is limited to a single line. When terminal width is
+constrained—for example, when several terminal windows are open side by side—important status
+information is truncated.
 
-```text
-Model: GPT-5.4  Reasoning: high  working  Context: 79%
-Project: cxstatusline  Git: main  dirty  5h: 88%  Week: 64%
-```
+**Before: built-in Codex footer**
 
-The project keeps the two commands intentionally separate:
+![Built-in Codex single-line footer truncated in a narrow terminal](docs/images/codex-built-in-footer.png)
+
+`cxstatusline` adds a safe, configurable multi-line footer so model, reasoning, context, project,
+Git, and usage information can stay visible.
+
+**After: cxstatusline multi-line footer**
+
+![cxstatusline showing Codex status information across multiple lines](docs/images/cxstatusline-multiline-footer.png)
+
+It brings Codex CLI an experience comparable to
+[ccstatusline](https://github.com/sirmalloc/ccstatusline) for Claude Code, while using a
+plugin-managed adapter built specifically for Codex.
+
+The project keeps the official and enhanced commands intentionally separate:
 
 ```text
 codex    official OpenAI Codex
