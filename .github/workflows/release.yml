@@ -76,7 +76,7 @@ jobs:
       - name: Check out and patch Codex
         shell: bash
         run: |
-          git clone --filter=blob:none https://github.com/openai/codex.git upstream
+          git -c core.autocrlf=false clone --filter=blob:none https://github.com/openai/codex.git upstream
           git -C upstream checkout "$CODEX_REVISION"
           git -C upstream apply "$GITHUB_WORKSPACE/patches/codex-status-line-command.patch"
       - name: Build patched adapter
